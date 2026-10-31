@@ -4,14 +4,6 @@
   ...
 }: let
   upstream = sources.shelly-manager;
-  inherit (upstream.src) owner repo;
-
-  commonMeta = {
-    homepage = "https://github.com/${owner}/${repo}";
-    changelog = "https://github.com/${owner}/${repo}/releases/tag/${upstream.version}";
-    license = lib.licenses.mit;
-    platforms = lib.platforms.unix;
-  };
 in
   lib.makeScope newScope (scope: {
     shelly-manager = scope.callPackage ({
@@ -23,8 +15,8 @@ in
       ...
     }:
       python3Packages.buildPythonApplication {
-        inherit (sources.shelly-manager) pname src;
-        version = lib.removePrefix "v" sources.shelly-manager.version;
+        inherit (upstream) pname src;
+        version = lib.removePrefix "v" upstream.version;
         pyproject = true;
         build-system = with python3Packages; [setuptools];
         propagatedBuildInputs = [shelly-manager-core];
@@ -43,20 +35,22 @@ in
           core = shelly-manager-core;
           web = shelly-manager-web;
         };
-        meta =
-          commonMeta
-          // {
-            description = "Local management for Shelly IoT devices without cloud connectivity";
-            longDescription = ''
-              Manage Shelly devices on your local network without connecting them to
-              the Shelly Cloud. Supports Gen1 (legacy HTTP) and Gen2 (RPC) devices:
-              discover devices via mDNS or network scanning, manage firmware updates
-              (including for devices with no internet access), export and apply
-              configuration in bulk, take encrypted per-device backups, and monitor
-              status. Available as a web interface, a command line tool and a REST
-              API, provided by the passthru sub-packages.
-            '';
-          };
+        meta = {
+          homepage = "https://github.com/${upstream.src.owner}/${upstream.src.repo}";
+          changelog = "https://github.com/${upstream.src.owner}/${upstream.src.repo}/releases/tag/${upstream.version}";
+          license = lib.licenses.mit;
+          platforms = lib.platforms.unix;
+          description = "Local management for Shelly IoT devices without cloud connectivity";
+          longDescription = ''
+            Manage Shelly devices on your local network without connecting them to
+            the Shelly Cloud. Supports Gen1 (legacy HTTP) and Gen2 (RPC) devices:
+            discover devices via mDNS or network scanning, manage firmware updates
+            (including for devices with no internet access), export and apply
+            configuration in bulk, take encrypted per-device backups, and monitor
+            status. Available as a web interface, a command line tool and a REST
+            API, provided by the passthru sub-packages.
+          '';
+        };
       }) {};
 
     shelly-manager-api = scope.callPackage ({
@@ -111,7 +105,7 @@ in
           };
         };
         meta =
-          commonMeta
+          shelly-manager.meta
           // {
             description = "REST API for Shelly Manager";
             longDescription = ''
@@ -153,7 +147,7 @@ in
           types-pyyaml
         ];
         meta =
-          commonMeta
+          shelly-manager.meta
           // {
             description = "Command-line interface for Shelly Manager";
             longDescription = ''
@@ -188,7 +182,7 @@ in
           cryptography
         ];
         meta =
-          commonMeta
+          shelly-manager.meta
           // {
             description = "Core business logic for Shelly Manager";
             longDescription = ''
@@ -228,7 +222,7 @@ in
           ln -sfT ${configJs} $out/lib/node_modules/web/public/config.js
         '';
         meta =
-          commonMeta
+          shelly-manager.meta
           // {
             description = "Web interface for Shelly Manager";
             longDescription = ''
