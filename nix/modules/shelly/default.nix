@@ -1,8 +1,5 @@
 {moduleWithSystem}:
-moduleWithSystem ({} @ perSystem: {
-  lib,
-  ...
-}: let
+moduleWithSystem ({} @ perSystem: {lib, ...}: let
   inherit (lib) mkOption types;
 in {
   options = {
