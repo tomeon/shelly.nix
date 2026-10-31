@@ -57,15 +57,24 @@
           default = config.packages.shelly-manager;
         };
 
-        treefmt = {
+        treefmt = let
+          nixCommon = {
+            enable = true;
+            excludes = ["nix/pkgs/_sources/generated.nix"];
+          };
+        in {
           flakeFormatter = true;
           projectRootFile = "flake.nix";
           #programs.black.enable = true;
           #programs.ruff-check.enable = true;
           #programs.ruff-format.enable = true;
-          programs.alejandra.enable = true;
-          programs.deadnix.enable = true;
-          programs.statix.enable = true;
+          programs.alejandra = nixCommon;
+          programs.deadnix =
+            nixCommon
+            // {
+              no-lambda-pattern-names = true;
+            };
+          programs.statix = nixCommon;
           programs.shfmt.enable = true;
           programs.shellcheck.enable = true;
         };
