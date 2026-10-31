@@ -26,6 +26,7 @@
         inputs.devshell.flakeModule
         inputs.flake-parts.flakeModules.modules
         inputs.treefmt-nix.flakeModule
+        ./nix/devshells.nix
       ];
 
       systems = [
@@ -39,14 +40,6 @@
         pkgs,
         ...
       }: {
-        devshells.default = {
-          commands = [
-            {
-              package = pkgs.nvfetcher;
-            }
-          ];
-        };
-
         packages = let
           sources = pkgs.callPackage ./nix/pkgs/_sources/generated.nix {};
           shellyManagerPackages = pkgs.callPackages (import ./nix/pkgs/shelly-manager {inherit sources;}) {};
