@@ -30,6 +30,7 @@
           inherit package;
           category = "tools";
         }) [
+          pkgs.act
           pkgs.flake-edit
           pkgs.nix-update
           pkgs.nvfetcher

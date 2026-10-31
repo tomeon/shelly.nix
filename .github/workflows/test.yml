@@ -1,0 +1,19 @@
+name: Run shelly.nix checks
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+jobs:
+  flake:
+    name: Run Nix flake checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            system-features = benchmark big-parallel kvm nixos-test uid-range
+      - name: Run flake checks
+        run: nix flake check -L
+      - name: Build packages
+        run: nix build -L .#default
