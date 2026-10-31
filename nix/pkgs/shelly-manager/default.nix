@@ -201,11 +201,7 @@ in
       shelly-manager,
       viteBaseApiUrl ? "http://localhost:8000",
       ...
-    }: let
-      npmDepsHashes = {
-        "1.10.0" = "sha256-a5aUs/P5hF5du8qXWZ5oajNz7zIViTdfo5jompcSXXw=";
-      };
-    in
+    }:
       buildNpmPackage (finalAttrs: let
         configJs = writeText "shelly-manager-web-config.js" ''
           window._env = ${lib.toJSON {
@@ -217,7 +213,7 @@ in
         inherit (shelly-manager) src version;
         pname = "${lib.getName shelly-manager}-web";
         sourceRoot = "${finalAttrs.src.name}/packages/web";
-        npmDepsHash = npmDepsHashes.${finalAttrs.version} or lib.fakeHash;
+        npmDepsHash = "sha256-dU27ZTD9+HHiQSsAlEM9zVVeSBHzJSNxSNnlG5ddZy4=";
         postInstall = ''
           ln -sfT ${configJs} $out/lib/node_modules/web/public/config.js
         '';
