@@ -1,0 +1,23 @@
+{
+    "shelly-manager": {
+        "cargoLock": null,
+        "date": null,
+        "extract": null,
+        "name": "shelly-manager",
+        "passthru": null,
+        "pinned": false,
+        "src": {
+            "deepClone": false,
+            "fetchSubmodules": false,
+            "leaveDotGit": false,
+            "name": null,
+            "owner": "jfmlima",
+            "repo": "shelly-manager",
+            "rev": "v1.12.0",
+            "sha256": "sha256-bse/V6euAVplBJsZm/kK3tdFuXxI+VV8x26pt61FOII=",
+            "sparseCheckout": [],
+            "type": "github"
+        },
+        "version": "v1.12.0"
+    }
+}

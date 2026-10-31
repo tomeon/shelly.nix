@@ -1,0 +1,3 @@
+[shelly-manager]
+fetch.github = "jfmlima/shelly-manager"
+src.github = "jfmlima/shelly-manager"
