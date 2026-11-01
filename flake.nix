@@ -90,6 +90,13 @@
         modules = let
           importModule = lib.flip flake-parts-lib.importApply {inherit moduleWithSystem;};
         in {
+          flake = let
+            shelly = ./nix/modules/flake-parts;
+          in {
+            inherit shelly;
+            default = shelly;
+          };
+
           nixos = let
             modules = lib.genAttrs' ["api" "cli" "web"] (type: let
               name = "shelly-manager-${type}";
@@ -117,6 +124,7 @@
           };
         };
 
+        flakeModules = self.modules.flake;
         nixosModules = self.modules.nixos;
       };
     });
