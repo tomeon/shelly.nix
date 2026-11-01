@@ -5,6 +5,10 @@
     devshell.url = "github:numtide/devshell";
     devshell.inputs.nixpkgs.follows = "nixpkgs";
 
+    # For `default.nix`, the entry point for Nix without flakes.
+    flake-compat.url = "github:edolstra/flake-compat";
+    flake-compat.flake = false;
+
     flake-parts.url = "github:hercules-ci/flake-parts";
     flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
 
