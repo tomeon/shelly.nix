@@ -30,6 +30,13 @@ def test_parse_sorts_and_normalises():
         {"version": 1, "devices": []},
         {"version": 1, "devices": {"a": {}}},
         {"version": 1, "devices": {"a": entry("x", components={"sys": 1})}},
+        {"version": 1, "devices": {"a": entry("x", scripts={"s": {"enable": True}})}},
+        {"version": 1, "devices": {"a": entry("x", scripts={"s": {"code": 1}})}},
+        {
+            "version": 1,
+            "devices": {"a": entry("x", schedules=[{"timespec": "x", "calls": []}])},
+        },
+        {"version": 1, "devices": {"a": entry("x", schedules=[{"calls": [{}]}])}},
     ],
 )
 def test_parse_rejects_malformed_manifests(document):

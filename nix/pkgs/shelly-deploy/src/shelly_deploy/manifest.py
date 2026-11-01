@@ -6,7 +6,7 @@ import fnmatch
 import json
 import shlex
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,10 @@ class DeviceSpec:
     components: dict[str, dict[str, Any]]
     reboot: str
     allow_network_changes: bool
+    # Script name -> {"code": str, "enable": bool}.
+    scripts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # None leaves the device's schedules alone.
+    schedules: list[dict[str, Any]] | None = None
 
     @classmethod
     def from_manifest(cls, name: str, raw: Any) -> DeviceSpec:
@@ -43,6 +47,15 @@ class DeviceSpec:
             components = raw.get("components") or {}
             if not all(isinstance(c, dict) for c in components.values()):
                 raise TypeError("component configurations must be objects")
+            scripts = raw.get("scripts") or {}
+            for script in scripts.values():
+                if not isinstance(script["code"], str):
+                    raise TypeError("script code must be a string")
+            schedules = raw.get("schedules")
+            if schedules is not None:
+                for job in schedules:
+                    if not isinstance(job["timespec"], str) or not job["calls"]:
+                        raise TypeError("schedule jobs need a timespec and calls")
             return cls(
                 name=name,
                 address=raw["address"],
@@ -54,6 +67,14 @@ class DeviceSpec:
                 allow_network_changes=bool(
                     deployment.get("allowNetworkChanges", False)
                 ),
+                scripts={
+                    script_name: {
+                        "code": script["code"],
+                        "enable": bool(script.get("enable", True)),
+                    }
+                    for script_name, script in scripts.items()
+                },
+                schedules=None if schedules is None else list(schedules),
             )
         except (AttributeError, KeyError, TypeError) as e:
             raise ManifestError(f"device {name}: malformed entry ({e})") from e

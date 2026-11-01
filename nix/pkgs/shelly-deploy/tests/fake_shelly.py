@@ -32,6 +32,12 @@ WRITE_ONLY = {
 # Component types whose changes take effect only after a restart.
 RESTART_REQUIRED = {"ble", "cloud", "eth", "mqtt", "wifi", "ws"}
 
+# Script.GetCode hands out at most this many bytes at a time.
+GET_CODE_BYTES = 512
+
+# A script containing this fails as soon as it starts.
+CRASH_MARKER = "crash()"
+
 
 def default_config(mac: str) -> dict[str, Any]:
     """Roughly a Shelly Plus 1PM's configuration."""
@@ -145,6 +151,10 @@ class FakeShelly:
         self.reboot_at: float | None = None
         self.reboots = 0
         self.calls: list[tuple[str, Any]] = []
+        # Script id -> {"id", "name", "enable", "running", "code"}.
+        self.scripts: dict[int, dict[str, Any]] = {}
+        self.jobs: list[dict[str, Any]] = []
+        self.next_id = 1
         # Test hooks: methods that fail, and components that ignore SetConfig.
         self.failing: set[str] = set()
         self.ignoring: set[str] = set()
@@ -158,6 +168,8 @@ class FakeShelly:
                 self.booted_at = self.reboot_at + self.boot_seconds
                 self.reboot_at = None
                 self.reboots += 1
+                for script in self.scripts.values():
+                    script["running"] = script["enable"] and not _crashes(script)
             return now < self.booted_at
 
     def device_info(self) -> dict[str, Any]:
@@ -227,7 +239,10 @@ class FakeShelly:
                 if name == "getdeviceinfo":
                     return self.device_info(), None
                 if name == "getconfig":
-                    return {key: self.reported(key) for key in self.config}, None
+                    config = {key: self.reported(key) for key in self.config}
+                    for script in self.scripts.values():
+                        config[f"script:{script['id']}"] = _script_config(script)
+                    return config, None
                 if name == "getstatus":
                     return {"sys": self.sys_status()}, None
                 if name == "reboot":
@@ -235,6 +250,11 @@ class FakeShelly:
                         time.monotonic() + params.get("delay_ms", 1000) / 1000
                     )
                     return None, None
+
+            if namespace == "script":
+                return self.script_call(name, params)
+            if namespace == "schedule":
+                return self.schedule_call(name, params)
 
             if name in ("getconfig", "setconfig", "getstatus"):
                 key = f"{namespace}:{params['id']}" if "id" in params else namespace
@@ -261,13 +281,115 @@ class FakeShelly:
 
             return None, (404, f"No handler for {method}")
 
+    def add_script(self, name: str, code: str = "", enable: bool = False) -> int:
+        """Put a script on the device, as if created by hand."""
+        with self.lock:
+            script_id = self.next_id
+            self.next_id += 1
+            self.scripts[script_id] = {
+                "id": script_id,
+                "name": name,
+                "enable": enable,
+                "running": enable,
+                "code": code,
+            }
+            return script_id
+
+    def script_call(self, name: str, params: dict[str, Any]) -> tuple[Any, Any]:
+        if name == "list":
+            listed = [
+                {k: s[k] for k in ("id", "name", "enable", "running")}
+                for s in self.scripts.values()
+            ]
+            return {"scripts": listed}, None
+        if name == "create":
+            script_id = self.next_id
+            self.next_id += 1
+            self.scripts[script_id] = {
+                "id": script_id,
+                "name": params.get("name") or f"script_{script_id}",
+                "enable": False,
+                "running": False,
+                "code": "",
+            }
+            return {"id": script_id}, None
+
+        script = self.scripts.get(params.get("id"))
+        if script is None:
+            return None, (-105, f"Argument 'id', value {params.get('id')} not found!")
+        if name == "getcode":
+            data = script["code"].encode()
+            start = int(params.get("offset", 0))
+            end = min(len(data), start + GET_CODE_BYTES)
+            while end < len(data) and data[end] & 0xC0 == 0x80:
+                end -= 1  # Not in the middle of a character.
+            return {"data": data[start:end].decode(), "left": len(data) - end}, None
+        if name == "putcode":
+            if script["running"]:
+                return None, (-103, "Script is running!")
+            code = params.get("code", "")
+            script["code"] = script["code"] + code if params.get("append") else code
+            return {"len": len(script["code"].encode())}, None
+        if name == "getconfig":
+            return _script_config(script), None
+        if name == "setconfig":
+            config = params.get("config") or {}
+            for key in ("name", "enable"):
+                if key in config:
+                    script[key] = config[key]
+            return {"restart_required": False}, None
+        if name == "start":
+            was_running = script["running"]
+            script["running"] = not _crashes(script)
+            return {"was_running": was_running}, None
+        if name == "stop":
+            was_running = script["running"]
+            script["running"] = False
+            return {"was_running": was_running}, None
+        if name == "delete":
+            del self.scripts[script["id"]]
+            return None, None
+        return None, (404, f"No handler for Script.{name}")
+
+    def schedule_call(self, name: str, params: dict[str, Any]) -> tuple[Any, Any]:
+        if name == "list":
+            return {"jobs": copy.deepcopy(self.jobs), "rev": len(self.calls)}, None
+        if name == "deleteall":
+            self.jobs = []
+            return {"rev": len(self.calls)}, None
+        if name == "create":
+            if not params.get("timespec") or not params.get("calls"):
+                return None, (-103, "Missing argument 'timespec' or 'calls'!")
+            job_id = self.next_id
+            self.next_id += 1
+            job = {"id": job_id, "enable": params.get("enable", True)}
+            job["timespec"] = params["timespec"]
+            # Like a device, leave out parameters that were not given.
+            job["calls"] = [
+                {k: v for k, v in call.items() if k != "params" or v}
+                for call in params["calls"]
+            ]
+            self.jobs.append(job)
+            return {"id": job_id, "rev": len(self.calls)}, None
+        return None, (404, f"No handler for Schedule.{name}")
+
     def state(self) -> dict[str, Any]:
         with self.lock:
             return {
                 "config": copy.deepcopy(self.config),
+                "scripts": copy.deepcopy(list(self.scripts.values())),
+                "jobs": copy.deepcopy(self.jobs),
                 "reboots": self.reboots,
                 "calls": [method for method, _ in self.calls],
             }
+
+
+def _script_config(script: dict[str, Any]) -> dict[str, Any]:
+    return {k: script[k] for k in ("id", "name", "enable")}
+
+
+def _crashes(script: dict[str, Any]) -> bool:
+    return CRASH_MARKER in script["code"]
 
 
 class Handler(BaseHTTPRequestHandler):

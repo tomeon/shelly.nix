@@ -24,14 +24,36 @@
               pass._secret = "/etc/shelly/mqtt-password";
             };
           };
+          scripts.hello.code = "print('hello from shelly.nix');";
+          schedules = [
+            {
+              timespec = "0 30 22 * * *";
+              calls = [
+                {
+                  method = "Switch.Set";
+                  params = {
+                    id = 0;
+                    on = false;
+                  };
+                }
+              ];
+            }
+          ];
         };
       }
     '';
 
+    # Just what the Shelly module needs, so that the test does not depend on
+    # the whole repository.
+    shellyNix = pkgs.lib.fileset.toSource {
+      root = ../..;
+      fileset = pkgs.lib.fileset.unions [../../lib ../../modules/shelly];
+    };
+
     fleet = pkgs.writeText "fleet.nix" ''
       let
         lib = import ${pkgs.path}/lib;
-        shelly = import ${self}/nix/lib {inherit lib;};
+        shelly = import ${shellyNix}/lib {inherit lib;};
       in
         shelly.shellyConfiguration {modules = [${fleetModule}];}
     '';
@@ -68,6 +90,8 @@
     with subtest("diff shows pending changes and changes nothing"):
         out = machine.succeed("shelly-deploy diff -f /etc/shelly/fleet.nix")
         assert "~ switch:0" in out, out
+        assert "+ script hello" in out, out
+        assert "~ schedules (1 job(s))" in out, out
         assert device()["config"]["switch:0"]["name"] is None
 
     with subtest("switch applies the configuration"):
@@ -77,6 +101,10 @@
         assert state["config"]["switch:0"]["in_mode"] == "follow", state
         assert state["config"]["mqtt"]["pass"] == "mqtt-secret", state
         assert state["reboots"] == 1, state
+        [script] = state["scripts"]
+        assert script["name"] == "hello" and script["running"], state
+        [job] = state["jobs"]
+        assert job["timespec"] == "0 30 22 * * *", state
         assert "secret" not in out, out
 
     with subtest("a second switch changes nothing"):

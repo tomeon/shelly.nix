@@ -26,7 +26,15 @@ from core.services.authentication_service import AuthenticationService
 from core.utils.validation import normalize_mac
 
 from .manifest import DeviceSpec
-from .plan import ComponentPlan, SecretError, plan_component, read_secret
+from .plan import (
+    ComponentPlan,
+    SchedulePlan,
+    ScriptPlan,
+    SecretError,
+    plan_component,
+    plan_schedules,
+    read_secret,
+)
 
 # Components whose misconfiguration can leave a device unreachable.  They are
 # applied last, and only when the manifest allows it.
@@ -34,6 +42,9 @@ NETWORK_COMPONENTS = frozenset({"wifi", "eth"})
 
 # Gen2+ devices have a single user.
 USERNAME = "admin"
+
+# Script code is uploaded in pieces of at most this many bytes.
+SCRIPT_CHUNK_BYTES = 1024
 
 
 class DeviceError(Exception):
@@ -70,12 +81,28 @@ def _component_type(key: str) -> str:
     return key.partition(":")[0]
 
 
+def _chunks(text: str, size: int) -> list[str]:
+    """Split text into pieces of at most `size` UTF-8 bytes, between characters."""
+    chunks, current, length = [], [], 0
+    for char in text:
+        width = len(char.encode())
+        if current and length + width > size:
+            chunks.append("".join(current))
+            current, length = [], 0
+        current.append(char)
+        length += width
+    chunks.append("".join(current))
+    return chunks
+
+
 @dataclass
 class DevicePlan:
     """How a device compares with its declared configuration."""
 
     info: dict[str, Any]
     components: list[ComponentPlan]
+    scripts: list[ScriptPlan] = field(default_factory=list)
+    schedules: SchedulePlan | None = None
 
     def pending(self, force: bool = False) -> list[ComponentPlan]:
         """The components to send: those that differ, or all of them if forced.
@@ -86,6 +113,38 @@ class DevicePlan:
         return sorted(
             chosen, key=lambda c: _component_type(c.key) in NETWORK_COMPONENTS
         )
+
+    def pending_scripts(self, force: bool = False) -> list[ScriptPlan]:
+        return [s for s in self.scripts if force or s.status != "unchanged"]
+
+    def schedules_pending(self, force: bool = False) -> bool:
+        return self.schedules is not None and (
+            force or self.schedules.status == "changed"
+        )
+
+    def has_pending(self, force: bool = False) -> bool:
+        return bool(
+            self.pending(force)
+            or self.pending_scripts(force)
+            or self.schedules_pending(force)
+        )
+
+    def differences(self) -> list[str]:
+        """What still differs, for reporting changes that did not take effect."""
+        found = [
+            change.describe()
+            for c in self.components
+            if c.status == "changed"
+            for change in c.changes
+        ]
+        found += [
+            f"script {s.name}: {', '.join(s.describe())}"
+            for s in self.scripts
+            if s.status != "unchanged"
+        ]
+        if self.schedules is not None and self.schedules.status == "changed":
+            found.append("schedules: " + ", ".join(self.schedules.describe()))
+        return found
 
 
 @dataclass
@@ -209,8 +268,63 @@ class Device:
                 f"refusing to change {', '.join(blocked)} without deployment.allowNetworkChanges"
             )
 
+        return await self._observe(info)
+
+    async def _observe(self, info: dict[str, Any]) -> DevicePlan:
         current = await self.call("Shelly.GetConfig")
-        return DevicePlan(info=info, components=self._compare(current))
+        return DevicePlan(
+            info=info,
+            components=self._compare(current),
+            scripts=await self._plan_scripts(),
+            schedules=await self._plan_schedules(),
+        )
+
+    async def _plan_scripts(self) -> list[ScriptPlan]:
+        if not self.spec.scripts:
+            return []
+        listed = await self.call("Script.List")
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for script in (listed or {}).get("scripts") or []:
+            by_name.setdefault(script.get("name"), []).append(script)
+        plans = []
+        for name, wanted in sorted(self.spec.scripts.items()):
+            found = by_name.get(name, [])
+            if len(found) > 1:
+                raise DeviceError(
+                    f"script {name}: {len(found)} scripts on the device have this name"
+                )
+            plan = ScriptPlan(name=name, code=wanted["code"], enable=wanted["enable"])
+            if found:
+                script = found[0]
+                plan.id = script["id"]
+                plan.current_code = await self.get_script_code(script["id"])
+                plan.current_enable = bool(script.get("enable"))
+                plan.running = bool(script.get("running"))
+            plans.append(plan)
+        return plans
+
+    async def _plan_schedules(self) -> SchedulePlan | None:
+        if self.spec.schedules is None:
+            return None
+        current = await self.call("Schedule.List")
+        try:
+            return plan_schedules(self.spec.schedules, current)
+        except SecretError as e:
+            raise DeviceError(f"schedules: {e}") from e
+
+    async def get_script_code(self, script_id: int) -> str:
+        """A script's code, read in as many pieces as the device hands out."""
+        parts: list[str] = []
+        offset = 0
+        while True:
+            answer = await self.call(
+                "Script.GetCode", {"id": script_id, "offset": offset}
+            )
+            data = (answer or {}).get("data") or ""
+            parts.append(data)
+            offset += len(data.encode())
+            if not data or not (answer or {}).get("left"):
+                return "".join(parts)
 
     def _compare(self, current: Any) -> list[ComponentPlan]:
         if not isinstance(current, dict):
@@ -226,33 +340,86 @@ class Device:
         return plans
 
     async def apply(self, plan: DevicePlan, force: bool = False) -> ApplyResult:
-        """Send pending components, reboot if needed, and verify the result."""
+        """Send what differs, reboot if needed, and verify the result.
+
+        Order: components, scripts, schedules, then network components.
+        """
         result = ApplyResult()
-        pending = plan.pending(force)
-        for component in pending:
+
+        async def step(label: str, action: Any) -> Any:
             try:
-                answer = await self.set_config(component.key, component.desired)
+                answer = await action
             except DeviceError as e:
                 done = (
                     f" (already applied: {', '.join(result.applied)})"
                     if result.applied
                     else ""
                 )
-                raise DeviceError(f"{component.key}: {e}{done}") from e
-            result.applied.append(component.key)
+                raise DeviceError(f"{label}: {e}{done}") from e
+            result.applied.append(label)
+            return answer
+
+        async def send(component: ComponentPlan) -> None:
+            answer = await step(
+                component.key, self.set_config(component.key, component.desired)
+            )
             if isinstance(answer, dict) and answer.get("restart_required"):
                 result.restart_required.append(component.key)
+
+        components = plan.pending(force)
+        for component in components:
+            if _component_type(component.key) not in NETWORK_COMPONENTS:
+                await send(component)
+        for script in plan.pending_scripts(force):
+            await step(f"script {script.name}", self.apply_script(script, force))
+        if plan.schedules_pending(force):
+            assert plan.schedules is not None
+            await step("schedules", self.apply_schedules(plan.schedules))
+        for component in components:
+            if _component_type(component.key) in NETWORK_COMPONENTS:
+                await send(component)
 
         if result.restart_required and self.spec.reboot == "if-required":
             await self.reboot()
             result.rebooted = True
 
-        current = await self.call("Shelly.GetConfig")
-        unconverged = [c for c in self._compare(current) if c.status == "changed"]
-        if unconverged:
-            details = "; ".join(ch.describe() for c in unconverged for ch in c.changes)
-            raise DeviceError(f"configuration did not take effect: {details}")
+        remaining = (await self._observe(plan.info)).differences()
+        if remaining:
+            raise DeviceError(
+                f"configuration did not take effect: {'; '.join(remaining)}"
+            )
         return result
+
+    async def apply_script(self, plan: ScriptPlan, force: bool = False) -> None:
+        """Create, upload, configure and start or stop one script."""
+        script_id = plan.id
+        running = bool(plan.running)
+        if script_id is None:
+            created = await self.call("Script.Create", {"name": plan.name})
+            script_id = created["id"]
+            running = False
+        if force or plan.id is None or plan.code_changed:
+            if running:
+                await self.call("Script.Stop", {"id": script_id})
+                running = False
+            for i, chunk in enumerate(_chunks(plan.code, SCRIPT_CHUNK_BYTES)):
+                await self.call(
+                    "Script.PutCode", {"id": script_id, "code": chunk, "append": i > 0}
+                )
+        if force or plan.current_enable != plan.enable:
+            await self.call(
+                "Script.SetConfig", {"id": script_id, "config": {"enable": plan.enable}}
+            )
+        if plan.enable and not running:
+            await self.call("Script.Start", {"id": script_id})
+        elif not plan.enable and running:
+            await self.call("Script.Stop", {"id": script_id})
+
+    async def apply_schedules(self, plan: SchedulePlan) -> None:
+        """Replace the device's schedule jobs with the declared ones."""
+        await self.call("Schedule.DeleteAll")
+        for job in plan.desired:
+            await self.call("Schedule.Create", job)
 
     async def set_config(self, key: str, config: dict[str, Any]) -> Any:
         """Call a component's SetConfig method."""

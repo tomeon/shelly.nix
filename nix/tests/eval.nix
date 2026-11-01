@@ -74,6 +74,8 @@
               allowNetworkChanges = false;
               reboot = "if-required";
             };
+            scripts = {};
+            schedules = null;
             components = {
               sys.device = {
                 name = "porch";
@@ -98,6 +100,8 @@
               allowNetworkChanges = false;
               reboot = "if-required";
             };
+            scripts = {};
+            schedules = null;
             components.sys.device = {
               name = "Kitchen plug";
               eco_mode = true;
@@ -159,8 +163,8 @@
     };
 
     testSecretInList = {
-      expr = failedAssertions (withDevice {components."script:1".args = [{_secret = "relative";}];});
-      expected = ["fleet.devices.d.components.script:1.args.0._secret: must be an absolute path (a string) outside the Nix store."];
+      expr = failedAssertions (withDevice {components."x:1".args = [{_secret = "relative";}];});
+      expected = ["fleet.devices.d.components.x:1.args.0._secret: must be an absolute path (a string) outside the Nix store."];
     };
 
     # Path values would be copied into the Nix store when turned into JSON.
@@ -182,6 +186,108 @@
     testBadMacRejected = {
       expr = throws (withDevice {mac = "not-a-mac";}).fleet.devices.d.mac;
       expected = true;
+    };
+
+    testScriptsAndSchedulesInManifest = {
+      expr =
+        (withDevice {
+          scripts.motion.code = "print(1)";
+          scripts.idle = {
+            code = "";
+            enable = false;
+          };
+          schedules = [
+            {
+              timespec = "0 30 22 * * *";
+              calls = [
+                {
+                  method = "Switch.Set";
+                  params = {
+                    id = 0;
+                    on = false;
+                  };
+                }
+                {method = "Shelly.Reboot";}
+              ];
+            }
+          ];
+        })
+        .build
+        .manifest
+        .devices
+        .d;
+      expected = {
+        address = "d";
+        mac = null;
+        tags = [];
+        auth.passwordFile = null;
+        deployment = {
+          allowNetworkChanges = false;
+          reboot = "if-required";
+        };
+        components = {};
+        scripts = {
+          motion = {
+            code = "print(1)";
+            enable = true;
+          };
+          idle = {
+            code = "";
+            enable = false;
+          };
+        };
+        schedules = [
+          {
+            enable = true;
+            timespec = "0 30 22 * * *";
+            calls = [
+              {
+                method = "Switch.Set";
+                params = {
+                  id = 0;
+                  on = false;
+                };
+              }
+              {
+                method = "Shelly.Reboot";
+                params = {};
+              }
+            ];
+          }
+        ];
+      };
+    };
+
+    testEmptyScheduleListIsKept = {
+      expr = (withDevice {schedules = [];}).build.manifest.devices.d.schedules;
+      expected = [];
+    };
+
+    testScheduleNeedsCalls = {
+      expr = throws (withDevice {schedules = [{timespec = "* * * * * *";}];}).build.manifest;
+      expected = true;
+    };
+
+    testScriptComponentsRejected = {
+      expr = failedAssertions (withDevice {components."script:1".enable = true;});
+      expected = ["fleet.devices.d.components.script:1: manage scripts with `fleet.devices.d.scripts.<name>` instead."];
+    };
+
+    testSecretInSchedule = {
+      expr = failedAssertions (withDevice {
+        schedules = [
+          {
+            timespec = "0 0 * * * *";
+            calls = [
+              {
+                method = "HTTP.GET";
+                params.url._secret = "relative";
+              }
+            ];
+          }
+        ];
+      });
+      expected = ["fleet.devices.d.schedules.0.calls.0.params.url._secret: must be an absolute path (a string) outside the Nix store."];
     };
 
     testConflictingDefinitionsRejected = {

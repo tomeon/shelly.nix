@@ -62,6 +62,13 @@ With flake-parts:
           pass._secret = "/run/secrets/mqtt-password";
         };
       };
+      scripts.motion-light.code = builtins.readFile ./motion-light.js;
+      schedules = [
+        {
+          timespec = "0 30 22 * * *";
+          calls = [{method = "Switch.Set"; params = {id = 0; on = false;};}];
+        }
+      ];
     };
 
     kitchen-plug.address = "kitchen-plug.lan";
@@ -80,6 +87,11 @@ porch (192.168.1.50): Plus1PM, gen 2, firmware 1.4.4
       initial_state: "match_input" -> "restore_last"
       name: null -> "Porch light"
   = sys
+  + script motion-light
+      code: 1734 bytes
+      enable: true
+  ~ schedules (1 job(s))
+      + 0 30 22 * * *: Switch.Set
 ...
 $ nix run github:tomeon/shelly.nix#shelly-deploy -- switch --flake .#home --on @outdoor
 ```
@@ -116,6 +128,8 @@ Options live under namespaces. The `fleet` namespace holds devices:
 | `fleet.devices.<name>.tags` | For selecting devices with `--on @tag`. |
 | `fleet.devices.<name>.auth.passwordFile` | The device's `admin` password, read at deploy time. |
 | `fleet.devices.<name>.components.<key>` | Component configuration, keyed `sys`, `mqtt`, `switch:0` and so on: the `config` object of the component's `SetConfig` call, as in the [Gen2+ API documentation](https://shelly-api-docs.shelly.cloud/gen2/). |
+| `fleet.devices.<name>.scripts.<script>` | A script, by its name on the device: `code`, and `enable` (default true) for whether it runs, now and at boot. |
+| `fleet.devices.<name>.schedules` | Scheduled jobs (`enable`, `timespec`, `calls`). Null (the default) leaves the device's schedules alone; a list, even an empty one, replaces them. |
 | `fleet.devices.<name>.deployment.reboot` | `"if-required"` (default) reboots when a change reports `restart_required`; `"never"` doesn't. |
 | `fleet.devices.<name>.deployment.allowNetworkChanges` | Must be set to manage `wifi` or `eth`, where a mistake can leave the device unreachable. |
 
@@ -127,6 +141,9 @@ Some semantics to be aware of:
 - **Only declared fields are managed.** The device keeps its own values for the
   rest. Removing a field from the configuration does not reset it on the device.
   To roll back, revert the configuration and switch again.
+- **Undeclared scripts are left alone,** and removing a script from the
+  configuration does not delete it. Declared schedules, by contrast, replace
+  all of the device's jobs.
 - **Secrets stay out of the store.** Write `{ _secret = "/path"; }` in place of
   a value (the convention of nixpkgs' `utils.genJqSecretsReplacementSnippet`);
   `shelly-deploy` substitutes the file's contents, without trailing newlines.
@@ -150,7 +167,9 @@ DEVICES: --on NAMES,GLOBS,@TAGS (repeatable) --parallel N --timeout S
 1. It resolves the address, then checks that the device is Gen2 or newer and,
    if `mac` is set, that its MAC matches.
 2. It reads `Shelly.GetConfig` and compares the declared fields.
-3. It calls `SetConfig` for each component that differs, `wifi` and `eth` last.
+3. It applies what differs, in this order: components (`SetConfig`), scripts
+   (created if missing, code uploaded in chunks, started or stopped), schedules
+   (replaced), and finally `wifi` and `eth`.
 4. It reboots once if any change reported `restart_required` and waits for the
    device to come back.
 5. It reads the configuration again and fails if any change did not take
@@ -172,8 +191,8 @@ Limitations:
 - Gen1 devices are not supported. Their configuration has a different shape,
   set over a different protocol.
 - Addresses must be IPv4, as in shelly-manager.
-- Components must already exist on the device; scripts and schedules are not
-  managed yet.
+- Components must already exist on the device. (Scripts are created as
+  needed.)
 
 ## NixOS modules
 

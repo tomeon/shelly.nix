@@ -13,7 +13,7 @@ from . import manifest
 from .device import Device, DeviceError, DevicePlan
 from .manifest import DeviceSpec, ManifestError
 
-MARKERS = {"changed": "~", "unreported": "?", "unchanged": "="}
+MARKERS = {"new": "+", "changed": "~", "unreported": "?", "unchanged": "="}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,6 +139,13 @@ def describe_plan(plan: DevicePlan, command: str) -> list[str]:
                 )
         lines.append(line)
         lines.extend(f"      {change.describe()}" for change in component.changes)
+    for script in plan.scripts:
+        lines.append(f"  {MARKERS[script.status]} script {script.name}")
+        lines.extend(f"      {detail}" for detail in script.describe())
+    if plan.schedules is not None:
+        jobs = len(plan.schedules.desired)
+        lines.append(f"  {MARKERS[plan.schedules.status]} schedules ({jobs} job(s))")
+        lines.extend(f"      {detail}" for detail in plan.schedules.describe())
     return lines
 
 
@@ -159,7 +166,7 @@ async def deploy(
                 plan = await device.plan()
                 lines += describe_plan(plan, args.command)
                 force = getattr(args, "force", False)
-                if plan.pending(force):
+                if plan.has_pending(force):
                     outcome = "changed"
                     if args.command == "switch":
                         result = await device.apply(plan, force)

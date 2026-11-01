@@ -30,12 +30,20 @@
   deviceAssertions = name: device: let
     where = "fleet.devices.${lib.strings.escapeNixIdentifier name}";
     componentKeys = lib.attrNames device.components;
-    secrets = lib.concatLists (lib.mapAttrsToList (key: findSecrets [key]) device.components);
+    secrets =
+      map (s: s // {path = ["components"] ++ s.path;})
+      (lib.concatLists (lib.mapAttrsToList (key: findSecrets [key]) device.components))
+      ++ findSecrets ["schedules"] (toManifest device).schedules;
     showPath = path: lib.concatStringsSep "." path;
   in
     map (key: {
       assertion = builtins.match componentKeyPattern key != null;
       message = "${where}.components: `${key}` is not a component key (expected e.g. `sys`, `mqtt` or `switch:0`).";
+    })
+    componentKeys
+    ++ map (key: {
+      assertion = !(lib.hasPrefix "script:" key);
+      message = "${where}.components.${key}: manage scripts with `${where}.scripts.<name>` instead.";
     })
     componentKeys
     ++ map (key: {
@@ -48,11 +56,11 @@
     in [
       {
         assertion = lib.attrNames s.value == ["_secret"];
-        message = "${where}.components.${showPath s.path}: a `_secret` placeholder must have no other attributes.";
+        message = "${where}.${showPath s.path}: a `_secret` placeholder must have no other attributes.";
       }
       {
         assertion = lib.isString secret && lib.hasPrefix "/" secret && !isStorePath secret;
-        message = "${where}.components.${showPath s.path}._secret: must be an absolute path (a string) outside the Nix store.";
+        message = "${where}.${showPath s.path}._secret: must be an absolute path (a string) outside the Nix store.";
       }
     ])
     secrets;
@@ -61,6 +69,16 @@
     inherit (device) address mac tags components;
     auth = {inherit (device.auth) passwordFile;};
     deployment = {inherit (device.deployment) allowNetworkChanges reboot;};
+    scripts = lib.mapAttrs (_: script: {inherit (script) code enable;}) device.scripts;
+    schedules =
+      if device.schedules == null
+      then null
+      else
+        map (job: {
+          inherit (job) enable timespec;
+          calls = map (call: {inherit (call) method params;}) job.calls;
+        })
+        device.schedules;
   };
 in {
   options.fleet = {

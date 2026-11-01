@@ -114,3 +114,114 @@ def plan_component(key: str, declared: dict[str, Any], current: Any) -> Componen
 
     compare(desired, current, ())
     return plan
+
+
+def _size(code: str | None) -> str:
+    return "none" if code is None else f"{len(code.encode())} bytes"
+
+
+@dataclass
+class ScriptPlan:
+    """How one declared script compares with the device.
+
+    `id` is None when the device has no script of that name yet.
+    """
+
+    name: str
+    code: str
+    enable: bool
+    id: int | None = None
+    current_code: str | None = None
+    current_enable: bool | None = None
+    running: bool | None = None
+
+    @property
+    def code_changed(self) -> bool:
+        return self.current_code != self.code
+
+    @property
+    def status(self) -> str:
+        if self.id is None:
+            return "new"
+        if (
+            self.code_changed
+            or self.current_enable != self.enable
+            or self.running != self.enable
+        ):
+            return "changed"
+        return "unchanged"
+
+    def describe(self) -> list[str]:
+        if self.id is None:
+            return [f"code: {_size(self.code)}", f"enable: {json.dumps(self.enable)}"]
+        lines = []
+        if self.code_changed:
+            lines.append(f"code: {_size(self.current_code)} -> {_size(self.code)}")
+        if self.current_enable != self.enable:
+            lines.append(
+                f"enable: {json.dumps(self.current_enable)} -> {json.dumps(self.enable)}"
+            )
+        if self.running != self.enable:
+            lines.append(
+                f"running: {json.dumps(self.running)} -> {json.dumps(self.enable)}"
+            )
+        return lines
+
+
+def normalise_job(job: dict[str, Any]) -> dict[str, Any]:
+    """A schedule job as Schedule.Create takes it, without the device's id."""
+    return {
+        "enable": bool(job.get("enable", True)),
+        "timespec": job.get("timespec"),
+        "calls": [
+            {"method": call.get("method"), "params": call.get("params") or {}}
+            for call in job.get("calls") or []
+        ],
+    }
+
+
+def _summary(job: dict[str, Any]) -> str:
+    methods = ", ".join(str(call["method"]) for call in job["calls"])
+    return f"{job['timespec']}: {methods}" + ("" if job["enable"] else " (disabled)")
+
+
+@dataclass
+class SchedulePlan:
+    """How the declared schedule jobs compare with the device's."""
+
+    desired: list[dict[str, Any]]
+    current: list[dict[str, Any]]
+
+    @property
+    def status(self) -> str:
+        return "unchanged" if same(self.desired, self.current) else "changed"
+
+    def describe(self) -> list[str]:
+        """Removed and added jobs, without their parameters (which may hold secrets)."""
+        if self.status == "unchanged":
+            return []
+
+        def key(job: dict[str, Any]) -> str:
+            return json.dumps(job, sort_keys=True)
+
+        unmatched = [key(job) for job in self.desired]
+        removed = []
+        for job in self.current:
+            if key(job) in unmatched:
+                unmatched.remove(key(job))
+            else:
+                removed.append(job)
+        added = [job for job in self.desired if key(job) in unmatched]
+        lines = [f"- {_summary(job)}" for job in removed]
+        lines += [f"+ {_summary(job)}" for job in added]
+        return lines or ["order changed"]
+
+
+def plan_schedules(declared: list[dict[str, Any]], current: Any) -> SchedulePlan:
+    """Compare declared schedule jobs with the device's `Schedule.List` jobs."""
+    desired, _ = resolve_secrets(declared)
+    jobs = current.get("jobs") if isinstance(current, dict) else None
+    return SchedulePlan(
+        desired=[normalise_job(job) for job in desired],
+        current=[normalise_job(job) for job in jobs or [] if isinstance(job, dict)],
+    )
