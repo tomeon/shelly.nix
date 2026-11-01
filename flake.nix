@@ -27,6 +27,7 @@
         inputs.devshell.flakeModule
         inputs.flake-parts.flakeModules.modules
         inputs.treefmt-nix.flakeModule
+        ./nix/checks.nix
         ./nix/devshells.nix
       ];
 
@@ -81,6 +82,8 @@
       };
 
       flake = {
+        lib = import ./nix/lib {inherit lib;};
+
         modules = let
           importModule = lib.flip flake-parts-lib.importApply {inherit moduleWithSystem;};
         in {
@@ -102,8 +105,9 @@
               default = shelly-manager;
             };
 
+          # The generic module needs no packages, hence no `moduleWithSystem`.
           shelly = let
-            shelly-manager = importModule ./nix/modules/shelly/default.nix;
+            shelly-manager = ./nix/modules/shelly;
           in {
             inherit shelly-manager;
             default = shelly-manager;
