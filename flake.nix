@@ -55,6 +55,10 @@
             shelly-manager-web
             ;
 
+          shelly-deploy = pkgs.callPackage ./nix/pkgs/shelly-deploy {
+            inherit (shellyManagerPackages) shelly-manager-core;
+          };
+
           default = config.packages.shelly-manager;
         };
 
@@ -66,9 +70,6 @@
         in {
           flakeFormatter = true;
           projectRootFile = "flake.nix";
-          #programs.black.enable = true;
-          #programs.ruff-check.enable = true;
-          #programs.ruff-format.enable = true;
           programs.alejandra = nixCommon;
           programs.deadnix =
             nixCommon
@@ -76,6 +77,8 @@
               no-lambda-pattern-names = true;
             };
           programs.statix = nixCommon;
+          programs.ruff-check.enable = true;
+          programs.ruff-format.enable = true;
           programs.shfmt.enable = true;
           programs.shellcheck.enable = true;
         };
