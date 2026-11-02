@@ -138,6 +138,52 @@
       expected = ["services.shelly-manager.api: the API listens on 127.office.lan without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
     };
 
+    # Not canonical IPv4 addresses, so looked up as host names.
+    testApiOnMalformedLoopbackAddresses = {
+      expr = map (listenAddress:
+        lib.length
+        (complaints {
+          services.shelly-manager.api = {
+            enable = true;
+            inherit listenAddress;
+          };
+        }).failed) ["127.0.0.999" "127.000.0.1" "127.0.0.01" "127.0.0.1.lan"];
+      expected = [1 1 1 1];
+    };
+
+    testApiOnLoopbackAddressBounds = {
+      expr = map (listenAddress:
+        (complaints {
+          services.shelly-manager.api = {
+            enable = true;
+            inherit listenAddress;
+          };
+        }).failed) ["127.255.255.255" "127.0.0.0" "127.10.200.9"];
+      expected = [[] [] []];
+    };
+
+    testExtraArgsCannotMoveTheListener = {
+      expr =
+        (complaints {
+          services.shelly-manager.api = {
+            enable = true;
+            authTokenFile = token;
+            extraArgs = ["--proxy-headers" "--host" "0.0.0.0" "--port=9000" "--uds" "/run/x" "--fd=3"];
+          };
+        }).failed;
+      expected = ["services.shelly-manager.api.extraArgs: --host, --port=9000, --uds, --fd=3 would change where the API listens, past the authentication check; use listenAddress and port."];
+    };
+
+    testExtraArgsOtherwiseAllowed = {
+      expr = complaints {
+        services.shelly-manager.api = {
+          enable = true;
+          extraArgs = ["--proxy-headers" "--forwarded-allow-ips" "127.0.0.1"];
+        };
+      };
+      expected = none;
+    };
+
     testApiOnNetworkWithToken = {
       expr = complaints {
         services.shelly-manager.api = {

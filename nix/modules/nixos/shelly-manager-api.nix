@@ -12,6 +12,15 @@ moduleWithSystem ({config, ...} @ perSystem: {
 
   inherit (import ./lib.nix {inherit lib;}) isLoopback;
 
+  # uvicorn options that decide where it listens.
+  bindingArgs =
+    lib.filter (
+      arg:
+        lib.any (option: arg == option || lib.hasPrefix "${option}=" arg)
+        ["--host" "--port" "--uds" "--fd"]
+    )
+    cfg.extraArgs;
+
   stateDir = "/var/lib/shelly-manager";
 
   settingsFormat = pkgs.formats.json {};
@@ -44,10 +53,11 @@ moduleWithSystem ({config, ...} @ perSystem: {
       SHELLY_AUTH_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/auth-token")
       export SHELLY_AUTH_TOKEN
     ''}
+    # uvicorn takes the last of repeated options: the module's come last.
     exec ${lib.getExe cfg.package} \
+      ${lib.escapeShellArgs cfg.extraArgs} \
       --host ${lib.escapeShellArg cfg.listenAddress} \
-      --port ${toString cfg.port} \
-      ${lib.escapeShellArgs cfg.extraArgs}
+      --port ${toString cfg.port}
   '';
 in {
   options = {
@@ -147,7 +157,11 @@ in {
           type = types.listOf types.str;
           default = [];
           example = ["--proxy-headers"];
-          description = "Extra arguments for uvicorn.";
+          description = ''
+            Extra arguments for uvicorn.  Where the API listens is set with
+            `listenAddress` and `port` alone, so `--host`, `--port`, `--uds`
+            and `--fd` are refused here.
+          '';
         };
       };
     };
@@ -155,6 +169,10 @@ in {
 
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion = bindingArgs == [];
+        message = "services.shelly-manager.api.extraArgs: ${lib.concatStringsSep ", " bindingArgs} would change where the API listens, past the authentication check; use listenAddress and port.";
+      }
       {
         assertion = cfg.authTokenFile != null || cfg.allowUnauthenticatedAccess || isLoopback cfg.listenAddress;
         message = "services.shelly-manager.api: the API listens on ${cfg.listenAddress} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
