@@ -118,7 +118,8 @@ in {
       type = types.attrsOf (types.submodule {
         options = {
           code = mkOption {
-            type = types.str;
+            # Script.PutCode takes no empty code.
+            type = types.nonEmptyStr;
             example = lib.literalExpression "builtins.readFile ./motion.js";
             description = "The script's source code.";
           };
@@ -200,7 +201,8 @@ in {
       description = ''
         Scheduled jobs.  When null, the device's schedules are left alone.
         Otherwise, they are replaced by these jobs whenever they differ; an
-        empty list removes them all.
+        empty list removes them all.  Devices take at most 20 jobs, of at most
+        5 calls each.
       '';
     };
 

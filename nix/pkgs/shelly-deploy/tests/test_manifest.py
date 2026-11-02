@@ -32,6 +32,8 @@ def test_parse_sorts_and_normalises():
         {"version": 1, "devices": {"a": entry("x", components={"sys": 1})}},
         {"version": 1, "devices": {"a": entry("x", scripts={"s": {"enable": True}})}},
         {"version": 1, "devices": {"a": entry("x", scripts={"s": {"code": 1}})}},
+        # Script.PutCode takes no empty code.
+        {"version": 1, "devices": {"a": entry("x", scripts={"s": {"code": ""}})}},
         {
             "version": 1,
             "devices": {"a": entry("x", schedules=[{"timespec": "x", "calls": []}])},

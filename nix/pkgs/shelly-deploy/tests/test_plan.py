@@ -73,3 +73,39 @@ def test_missing_secret_file(tmp_path):
 def test_objects_with_more_than_a_secret_are_left_alone():
     value = {"_secret": "/x", "other": 1}
     assert resolve_secrets(value) == (value, frozenset())
+
+
+def test_new_keys_are_changes_not_unreported():
+    # A key the device has no value for yet, or a misspelt one, is not a
+    # write-only field: it must be sent, and checked afterwards.
+    plan = plan_component("sys", {"ui_data": {"label": "Porch"}}, {"ui_data": {}})
+    assert plan.status == "changed"
+    assert [c.describe() for c in plan.changes] == [
+        'ui_data.label: (absent) -> "Porch"'
+    ]
+
+
+def test_write_only_fields_are_known_per_component_type():
+    plan = plan_component(
+        "wifi", {"sta": {"ssid": "x", "pass": "y"}}, {"sta": {"ssid": "x"}}
+    )
+    assert plan.status == "unreported"
+    assert plan.unreported == [("sta", "pass")]
+    # `pass` is write-only for MQTT and WiFi, not for every component.
+    plan = plan_component("ws", {"pass": "y"}, {})
+    assert plan.status == "changed"
+
+
+def test_absent_secrets_are_unreported(tmp_path):
+    secret = tmp_path / "token"
+    secret.write_text("t")
+    plan = plan_component("http", {"token": {"_secret": str(secret)}}, {})
+    assert plan.status == "unreported"
+    assert plan.unreported == [("token",)]
+
+
+def test_secret_files_must_be_utf8(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"\xff\xfe")
+    with pytest.raises(SecretError, match="not valid UTF-8"):
+        resolve_secrets({"pass": {"_secret": str(secret)}})

@@ -30,7 +30,20 @@ WRITE_ONLY = {
 }
 
 # Component types whose changes take effect only after a restart.
-RESTART_REQUIRED = {"ble", "cloud", "eth", "mqtt", "wifi", "ws"}
+RESTART_REQUIRED = {"ble", "cloud", "mqtt", "ws"}
+
+# Component types whose changes make the device reconnect shortly afterwards,
+# as WiFi.SetConfig does, instead of requiring a restart.
+RECONNECTING = {"eth", "wifi"}
+
+# Shelly's limits on schedules: jobs per device, and calls per job.
+MAX_JOBS = 20
+MAX_CALLS = 5
+
+# The errors `dispatch` returns for a call that goes unanswered, and for one
+# answered with an HTTP 500.
+OUTAGE = (0, "outage")
+HTTP_ERROR = (500, "Internal Server Error")
 
 # Script.GetCode hands out at most this many bytes at a time.
 GET_CODE_BYTES = 512
@@ -139,11 +152,21 @@ class FakeShelly:
         gen: int = 2,
         password: str | None = None,
         boot_seconds: float = 1.0,
+        reconnect_after: float = 0.2,
+        reconnect_seconds: float = 1.0,
+        ip: str | None = None,
     ):
         self.mac = mac
         self.gen = gen
         self.password = password
         self.boot_seconds = boot_seconds
+        self.reconnect_after = reconnect_after
+        self.reconnect_seconds = reconnect_seconds
+        # The local address the device answers on; None means any.
+        self.ip = ip
+        self.offline: tuple[float, float] | None = None
+        self.next_ip: str | None = None
+        self.reconnects = 0
         self.device_id = f"shellyplus1pm-{mac.lower()}"
         self.config = default_config(mac)
         self.lock = threading.Lock()
@@ -155,13 +178,24 @@ class FakeShelly:
         self.scripts: dict[int, dict[str, Any]] = {}
         self.jobs: list[dict[str, Any]] = []
         self.next_id = 1
-        # Test hooks: methods that fail, and components that ignore SetConfig.
+        # Test hooks: methods that fail, components that ignore SetConfig, and
+        # methods whose effect happens but whose answer never arrives.
         self.failing: set[str] = set()
         self.ignoring: set[str] = set()
+        self.dropping: set[str] = set()
+        # Method -> (n, seconds): the n-th call goes unanswered, and the device
+        # stays offline for that long.
+        self.outages: dict[str, tuple[int, float]] = {}
+        # Method -> n: the n-th call is answered with an HTTP 500.
+        self.http_errors: dict[str, int] = {}
+        self.counts: dict[str, int] = {}
 
     # Reboots happen `delay_ms` after Shelly.Reboot; the device then answers
     # nothing for `boot_seconds`, and comes back with its uptime reset.
-    def is_down(self) -> bool:
+    #
+    # Network changes take the device offline `reconnect_after` seconds later,
+    # for `reconnect_seconds`; it comes back at its new static IP, if any.
+    def is_down(self, local_ip: str | None = None) -> bool:
         with self.lock:
             now = time.monotonic()
             if self.reboot_at is not None and now >= self.reboot_at:
@@ -170,7 +204,31 @@ class FakeShelly:
                 self.reboots += 1
                 for script in self.scripts.values():
                     script["running"] = script["enable"] and not _crashes(script)
+            if self.offline is not None and now >= self.offline[1]:
+                self.offline = None
+                if self.next_ip is not None:
+                    self.ip, self.next_ip = self.next_ip, None
+            if self.offline is not None and now >= self.offline[0]:
+                return True
+            if self.ip is not None and local_ip is not None and local_ip != self.ip:
+                return True
             return now < self.booted_at
+
+    def _reconnect(self) -> None:
+        """Start reconnecting, moving to a newly configured static IP."""
+        start = time.monotonic() + self.reconnect_after
+        self.offline = (start, start + self.reconnect_seconds)
+        self.reconnects += 1
+        sections = [self.config["wifi"].get(k) for k in ("sta", "sta1")]
+        sections.append(self.config.get("eth"))
+        for section in sections:
+            if (
+                isinstance(section, dict)
+                and section.get("enable", True)
+                and section.get("ipv4mode") == "static"
+                and section.get("ip")
+            ):
+                self.next_ip = section["ip"]
 
     def device_info(self) -> dict[str, Any]:
         return {
@@ -231,6 +289,14 @@ class FakeShelly:
         """Run an RPC call, returning `(result, error)`."""
         with self.lock:
             self.calls.append((method, copy.deepcopy(params)))
+            self.counts[method] = self.counts.get(method, 0) + 1
+            outage = self.outages.get(method)
+            if outage is not None and self.counts[method] == outage[0]:
+                now = time.monotonic()
+                self.offline = (now, now + outage[1])
+                return None, OUTAGE
+            if self.http_errors.get(method) == self.counts[method]:
+                return None, HTTP_ERROR
             if method in self.failing:
                 return None, (-103, f"{method} failed (test hook)")
             namespace, _, name = method.lower().partition(".")
@@ -275,6 +341,8 @@ class FakeShelly:
                 if key not in self.ignoring:
                     _merge(self.config[key], config)
                     self.config["sys"]["cfg_rev"] += 1
+                if key.partition(":")[0] in RECONNECTING:
+                    self._reconnect()
                 return {
                     "restart_required": key.partition(":")[0] in RESTART_REQUIRED
                 }, None
@@ -328,6 +396,8 @@ class FakeShelly:
             if script["running"]:
                 return None, (-103, "Script is running!")
             code = params.get("code", "")
+            if not code:
+                return None, (-103, "Argument 'code', length must be greater than 0!")
             script["code"] = script["code"] + code if params.get("append") else code
             return {"len": len(script["code"].encode())}, None
         if name == "getconfig":
@@ -358,19 +428,32 @@ class FakeShelly:
             self.jobs = []
             return {"rev": len(self.calls)}, None
         if name == "create":
-            if not params.get("timespec") or not params.get("calls"):
+            if len(self.jobs) >= MAX_JOBS:
+                return None, (-103, "Maximum number of schedules reached!")
+            if "timespec" not in params or "calls" not in params:
                 return None, (-103, "Missing argument 'timespec' or 'calls'!")
+            error = _job_error(params)
+            if error:
+                return None, (-103, error)
             job_id = self.next_id
             self.next_id += 1
-            job = {"id": job_id, "enable": params.get("enable", True)}
-            job["timespec"] = params["timespec"]
-            # Like a device, leave out parameters that were not given.
-            job["calls"] = [
-                {k: v for k, v in call.items() if k != "params" or v}
-                for call in params["calls"]
-            ]
+            job = {"id": job_id, "enable": True}
+            _update_job(job, params)
             self.jobs.append(job)
             return {"id": job_id, "rev": len(self.calls)}, None
+
+        job = next((j for j in self.jobs if j["id"] == params.get("id")), None)
+        if job is None:
+            return None, (-105, f"Argument 'id', value {params.get('id')} not found!")
+        if name == "update":
+            error = _job_error(params)
+            if error:
+                return None, (-103, error)
+            _update_job(job, params)
+            return {"rev": len(self.calls)}, None
+        if name == "delete":
+            self.jobs.remove(job)
+            return {"rev": len(self.calls)}, None
         return None, (404, f"No handler for Schedule.{name}")
 
     def state(self) -> dict[str, Any]:
@@ -380,8 +463,35 @@ class FakeShelly:
                 "scripts": copy.deepcopy(list(self.scripts.values())),
                 "jobs": copy.deepcopy(self.jobs),
                 "reboots": self.reboots,
+                "reconnects": self.reconnects,
+                "ip": self.ip,
                 "calls": [method for method, _ in self.calls],
             }
+
+
+def _job_error(params: dict[str, Any]) -> str | None:
+    """Why a job's parameters would be refused, if they would be."""
+    timespec = params.get("timespec", "@sunrise")
+    if not isinstance(timespec, str) or not (
+        timespec.startswith("@") or len(timespec.split()) == 6
+    ):
+        return f"Invalid timespec {timespec!r}!"
+    calls = params.get("calls", [{}])
+    if not calls or len(calls) > MAX_CALLS:
+        return f"A job takes 1 to {MAX_CALLS} calls!"
+    return None
+
+
+def _update_job(job: dict[str, Any], params: dict[str, Any]) -> None:
+    for key in ("enable", "timespec"):
+        if key in params:
+            job[key] = params[key]
+    if "calls" in params:
+        # Like a device, leave out parameters that were not given.
+        job["calls"] = [
+            {k: v for k, v in call.items() if k != "params" or v}
+            for call in params["calls"]
+        ]
 
 
 def _script_config(script: dict[str, Any]) -> dict[str, Any]:
@@ -414,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
         device = self.server.device
         if self.path == "/_test/state":
             self._send_json(200, device.state())
-        elif device.is_down():
+        elif device.is_down(self.connection.getsockname()[0]):
             self.close_connection = True
         elif self.path == "/shelly" and device.gen < 2:
             self._send_json(
@@ -433,8 +543,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         device = self.server.device
-        if device.is_down():
-            # A rebooting device does not answer at all.
+        if device.is_down(self.connection.getsockname()[0]):
+            # A rebooting (or moved) device does not answer at all.
             self.close_connection = True
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -460,6 +570,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         result, error = device.dispatch(method, params)
+        if error == OUTAGE or method.lower() in {m.lower() for m in device.dropping}:
+            self.close_connection = True
+            return
+        if error == HTTP_ERROR:
+            self._send_json(500, {"code": 500, "message": error[1]})
+            return
         response: dict[str, Any] = {"id": frame.get("id"), "src": device.device_id}
         if error is None:
             response["result"] = result

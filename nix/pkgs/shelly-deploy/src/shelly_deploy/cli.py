@@ -171,6 +171,11 @@ async def deploy(
                     if args.command == "switch":
                         result = await device.apply(plan, force)
                         lines.append(f"  applied {', '.join(result.applied)}")
+                        if result.unanswered:
+                            lines.append(
+                                f"  no answer to {', '.join(result.unanswered)} "
+                                "while the device reconnected; verified afterwards"
+                            )
                         if result.restart_required:
                             restart = f"  restart required by {', '.join(result.restart_required)}: "
                             restart += (
@@ -179,8 +184,17 @@ async def deploy(
                                 else "not rebooting (deployment.reboot = never)"
                             )
                             lines.append(restart)
+                        if result.moved_to:
+                            lines.append(
+                                f"  the device now answers at {result.moved_to}; "
+                                "update its `address`"
+                            )
         except DeviceError as e:
             lines.append(f"  error: {e}")
+            outcome = "failed"
+        except Exception as e:
+            logging.getLogger(__name__).debug("unexpected error", exc_info=True)
+            lines.append(f"  error: unexpected {type(e).__name__}: {e}")
             outcome = "failed"
     print("\n".join([describe_device(spec, plan), *lines]), flush=True)
     return outcome

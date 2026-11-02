@@ -171,7 +171,9 @@ def test_network_components_go_last(device, deploy, tmp_path):
     assert device.config["wifi"]["sta"]["ssid"] == "other"
     assert device.config["wifi"]["sta"]["pass"] == "wifi-password"
     assert device.config["wifi"]["sta"]["ipv4mode"] == "dhcp"
-    assert device.reboots == 1
+    # WiFi changes make the device reconnect rather than restart.
+    assert device.reboots == 0
+    assert device.reconnects == 1
 
 
 def test_gen1_devices_are_rejected(make_device, deploy):
@@ -314,3 +316,43 @@ def test_bad_manifest(deploy, tmp_path):
     code, out = deploy("diff", {"porch": {"no": "address"}})
     assert code == 2
     assert "device porch: malformed entry" in out
+
+
+def test_new_keys_are_applied(device, deploy):
+    devices = {
+        "porch": entry(
+            device.address, components={"sys": {"ui_data": {"label": "Porch"}}}
+        )
+    }
+    code, out = deploy("switch", devices)
+    assert code == 0, out
+    assert device.config["sys"]["ui_data"] == {"label": "Porch"}
+    assert (
+        "1 device(s): 0 changed, 1 unchanged, 0 failed" in deploy("switch", devices)[1]
+    )
+
+
+def test_keys_the_device_ignores_are_reported(device, deploy):
+    # A misspelt field the device does not store is caught by verification.
+    device.ignoring.add("sys")
+    devices = {
+        "porch": entry(device.address, components={"sys": {"device": {"nmae": "x"}}})
+    }
+    code, out = deploy("switch", devices)
+    assert code == 1
+    assert 'configuration did not take effect: device.nmae: (absent) -> "x"' in out
+
+
+def test_an_undecodable_secret_fails_only_its_device(make_device, deploy, tmp_path):
+    a, b = make_device(), make_device()
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"\xff\xfe")
+    devices = {
+        "a": entry(a.address, auth={"passwordFile": str(secret)}),
+        "b": entry(b.address, components={"switch:0": {"name": "b"}}),
+    }
+    code, out = deploy("switch", devices)
+    assert code == 1
+    assert f"cannot read secret {secret}: not valid UTF-8" in out
+    assert b.config["switch:0"]["name"] == "b"
+    assert "2 device(s): 1 changed, 0 unchanged, 1 failed" in out

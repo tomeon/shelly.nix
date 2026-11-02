@@ -34,6 +34,7 @@ from .plan import (
     plan_component,
     plan_schedules,
     read_secret,
+    same,
 )
 
 # Components whose misconfiguration can leave a device unreachable.  They are
@@ -46,9 +47,25 @@ USERNAME = "admin"
 # Script code is uploaded in pieces of at most this many bytes.
 SCRIPT_CHUNK_BYTES = 1024
 
+# Shelly's limits on schedules: jobs per device, and calls per job.
+MAX_SCHEDULE_JOBS = 20
+MAX_SCHEDULE_CALLS = 5
+
+# A device reconnects "about a second" after storing new WiFi settings; give it
+# this long to drop its connections before looking for it again.
+RECONNECT_DELAY = 3.0
+
 
 class DeviceError(Exception):
-    """Something went wrong with one device; other devices carry on."""
+    """Something went wrong with one device; other devices carry on.
+
+    `unreachable` is set when the device did not answer at all, as opposed to
+    answering with an error.
+    """
+
+    def __init__(self, message: str, *, unreachable: bool = False):
+        super().__init__(message)
+        self.unreachable = unreachable
 
 
 class _PasswordFile(CredentialsRepository):
@@ -79,6 +96,16 @@ class _PasswordFile(CredentialsRepository):
 
 def _component_type(key: str) -> str:
     return key.partition(":")[0]
+
+
+def _merge(base: Any, update: Any) -> Any:
+    """`update` deep-merged over `base`, as SetConfig applies a partial config."""
+    if not isinstance(base, dict) or not isinstance(update, dict):
+        return update
+    merged = dict(base)
+    for key, value in update.items():
+        merged[key] = _merge(base.get(key), value)
+    return merged
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -152,6 +179,10 @@ class ApplyResult:
     applied: list[str] = field(default_factory=list)
     restart_required: list[str] = field(default_factory=list)
     rebooted: bool = False
+    # Network changes the device stopped answering for, verified afterwards.
+    unanswered: list[str] = field(default_factory=list)
+    # Where the device answers now, if that is not where it was reached.
+    moved_to: str | None = None
 
 
 async def resolve(address: str) -> str:
@@ -188,6 +219,7 @@ class Device:
         self.timeout = timeout
         self.reboot_timeout = reboot_timeout
         self._target = ""
+        self._mac = ""
         self._client: AsyncShellyRPCClient | None = None
 
     async def __aenter__(self) -> Self:
@@ -219,12 +251,18 @@ class Device:
         if self._client is not None:
             await self._client.close()
 
-    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def call(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        target: str | None = None,
+    ) -> Any:
         """Call an RPC method, returning its result."""
         assert self._client is not None, "use Device as an async context manager"
         try:
             response, _ = await self._client.make_rpc_request(
-                self._target, method, params, timeout=self.timeout
+                target or self._target, method, params, timeout=self.timeout
             )
             return rpc_result(response)
         except RpcError as e:
@@ -237,11 +275,15 @@ class Device:
             )
             raise DeviceError(f"authentication failed ({hint})") from e
         except DeviceCommunicationError as e:
-            if str(e.details.get("error", "")).startswith("HTTP 404"):
+            error = str(e.details.get("error", ""))
+            if error.startswith("HTTP 404"):
                 raise DeviceError(
                     "no Gen2+ RPC endpoint; Gen1 devices are not supported"
                 ) from e
-            raise DeviceError(e.message) from e
+            # "HTTP <status>" means the device answered, with an error.
+            raise DeviceError(
+                e.message, unreachable=not error.startswith("HTTP ")
+            ) from e
         except ShellyManagerError as e:
             raise DeviceError(e.message) from e
 
@@ -255,7 +297,8 @@ class Device:
             raise DeviceError("not a Gen2+ device; Gen1 devices are not supported")
 
         mac = info.get("mac")
-        if self.spec.mac and normalize_mac(str(mac or "")) != self.spec.mac:
+        self._mac = normalize_mac(str(mac or ""))
+        if self.spec.mac and self._mac != self.spec.mac:
             raise DeviceError(
                 f"MAC mismatch: expected {self.spec.mac}, device reports {mac}"
             )
@@ -346,16 +389,19 @@ class Device:
         """
         result = ApplyResult()
 
+        def failed(label: str, e: DeviceError) -> DeviceError:
+            done = (
+                f" (already applied: {', '.join(result.applied)})"
+                if result.applied
+                else ""
+            )
+            return DeviceError(f"{label}: {e}{done}", unreachable=e.unreachable)
+
         async def step(label: str, action: Any) -> Any:
             try:
                 answer = await action
             except DeviceError as e:
-                done = (
-                    f" (already applied: {', '.join(result.applied)})"
-                    if result.applied
-                    else ""
-                )
-                raise DeviceError(f"{label}: {e}{done}") from e
+                raise failed(label, e) from e
             result.applied.append(label)
             return answer
 
@@ -367,28 +413,119 @@ class Device:
                 result.restart_required.append(component.key)
 
         components = plan.pending(force)
+        network = [
+            c for c in components if _component_type(c.key) in NETWORK_COMPONENTS
+        ]
         for component in components:
-            if _component_type(component.key) not in NETWORK_COMPONENTS:
+            if component not in network:
                 await send(component)
         for script in plan.pending_scripts(force):
             await step(f"script {script.name}", self.apply_script(script, force))
         if plan.schedules_pending(force):
             assert plan.schedules is not None
             await step("schedules", self.apply_schedules(plan.schedules))
-        for component in components:
-            if _component_type(component.key) in NETWORK_COMPONENTS:
+
+        reached_at = self._target
+        addresses = [self.spec.address, *self._static_addresses(network)]
+        deadline = time.monotonic() + self.reboot_timeout
+        for component in network:
+            try:
                 await send(component)
+            except DeviceError as e:
+                # A device can store new network settings and drop the
+                # connection before answering; verification below decides.
+                if not e.unreachable:
+                    raise
+                result.unanswered.append(component.key)
+        if network:
+            # Re-resolved, in case the change moved the device.
+            await asyncio.sleep(RECONNECT_DELAY)
+            await self._find(
+                addresses, deadline, f"changing {', '.join(c.key for c in network)}"
+            )
 
         if result.restart_required and self.spec.reboot == "if-required":
-            await self.reboot()
+            await self.reboot(addresses)
             result.rebooted = True
 
-        remaining = (await self._observe(plan.info)).differences()
+        remaining = (await self._observe_settled(plan.info, addresses)).differences()
         if remaining:
             raise DeviceError(
                 f"configuration did not take effect: {'; '.join(remaining)}"
             )
+        if self._target != reached_at:
+            result.moved_to = self._target
         return result
+
+    def _static_addresses(self, network: list[ComponentPlan]) -> list[str]:
+        """Static IPs that network changes give the device, as addresses.
+
+        After such a change, the device is looked for at these as well as at
+        its declared address.
+        """
+        port = self.spec.address.rpartition(":")[2] if ":" in self.spec.address else ""
+        found: list[str] = []
+        for component in network:
+            config = _merge(component.current, component.desired)
+            if not isinstance(config, dict):
+                continue
+            if _component_type(component.key) == "wifi":
+                sections = [config.get("sta"), config.get("sta1")]
+            else:
+                sections = [config]
+            for section in sections:
+                if (
+                    isinstance(section, dict)
+                    and section.get("enable", True) is not False
+                    and section.get("ipv4mode") == "static"
+                    and isinstance(section.get("ip"), str)
+                ):
+                    address = f"{section['ip']}:{port}" if port else section["ip"]
+                    if address not in found:
+                        found.append(address)
+        return found
+
+    async def _answering(self, addresses: list[str]) -> str | None:
+        """The first address at which this device (by MAC) answers, if any."""
+        for address in addresses:
+            try:
+                target = await resolve(address)
+                info = await self.call("Shelly.GetDeviceInfo", target=target)
+            except DeviceError:
+                continue
+            mac = info.get("mac") if isinstance(info, dict) else None
+            if normalize_mac(str(mac or "")) == self._mac:
+                return target
+        return None
+
+    async def _find(self, addresses: list[str], deadline: float, after: str) -> None:
+        """Wait until the device answers at one of the addresses."""
+        while True:
+            target = await self._answering(addresses)
+            if target is not None:
+                self._target = target
+                return
+            if time.monotonic() >= deadline:
+                raise DeviceError(
+                    f"no answer at {', '.join(addresses)} within "
+                    f"{self.reboot_timeout:g}s of {after}; the change may have "
+                    "moved the device or cut it off",
+                    unreachable=True,
+                )
+            await asyncio.sleep(1)
+
+    async def _observe_settled(
+        self, info: dict[str, Any], addresses: list[str]
+    ) -> DevicePlan:
+        """Observe the device, riding out connection drops while it settles."""
+        deadline = time.monotonic() + self.reboot_timeout
+        while True:
+            try:
+                return await self._observe(info)
+            except DeviceError as e:
+                if not e.unreachable or time.monotonic() >= deadline:
+                    raise
+            await self._find(addresses, deadline, "applying the configuration")
 
     async def apply_script(self, plan: ScriptPlan, force: bool = False) -> None:
         """Create, upload, configure and start or stop one script."""
@@ -416,10 +553,49 @@ class Device:
             await self.call("Script.Stop", {"id": script_id})
 
     async def apply_schedules(self, plan: SchedulePlan) -> None:
-        """Replace the device's schedule jobs with the declared ones."""
-        await self.call("Schedule.DeleteAll")
+        """Make the device's schedule jobs the declared ones.
+
+        Existing jobs are updated in place, in order, and missing ones created;
+        if any of that fails, what was done is undone.  Jobs left over are
+        deleted only once everything else has succeeded, so a failure never
+        loses a job the device had.
+        """
+        if len(plan.desired) > MAX_SCHEDULE_JOBS:
+            raise DeviceError(
+                f"{len(plan.desired)} jobs declared; devices take at most {MAX_SCHEDULE_JOBS}"
+            )
         for job in plan.desired:
-            await self.call("Schedule.Create", job)
+            if len(job["calls"]) > MAX_SCHEDULE_CALLS:
+                raise DeviceError(
+                    f"a job at {job['timespec']} makes {len(job['calls'])} calls; "
+                    f"devices take at most {MAX_SCHEDULE_CALLS}"
+                )
+
+        existing = list(zip(plan.current_ids, plan.current, strict=True))
+        undo: list[tuple[str, dict[str, Any]]] = []
+        try:
+            for (job_id, old), new in zip(existing, plan.desired, strict=False):
+                if not same(old, new):
+                    await self.call("Schedule.Update", {"id": job_id, **new})
+                    undo.append(("Schedule.Update", {"id": job_id, **old}))
+            for new in plan.desired[len(existing) :]:
+                created = await self.call("Schedule.Create", new)
+                undo.append(("Schedule.Delete", {"id": created["id"]}))
+        except DeviceError as e:
+            try:
+                for method, params in reversed(undo):
+                    await self.call(method, params)
+            except DeviceError as undo_error:
+                raise DeviceError(
+                    f"{e}; restoring the previous jobs failed too: {undo_error}",
+                    unreachable=e.unreachable,
+                ) from e
+            raise DeviceError(
+                f"{e}; the previous jobs were restored", unreachable=e.unreachable
+            ) from e
+
+        for job_id, _ in existing[len(plan.desired) :]:
+            await self.call("Schedule.Delete", {"id": job_id})
 
     async def set_config(self, key: str, config: dict[str, Any]) -> Any:
         """Call a component's SetConfig method."""
@@ -430,14 +606,23 @@ class Device:
             params["id"] = int(index)
         return await self.call(f"{namespace}.SetConfig", params)
 
-    async def reboot(self) -> None:
-        """Reboot the device and wait until it answers again."""
+    async def reboot(self, addresses: list[str] | None = None) -> None:
+        """Reboot the device and wait until it answers again.
+
+        It is looked for at `addresses` (by default, its declared address).
+        """
+        addresses = addresses or [self.spec.address]
         before = await self._uptime()
         await self.call("Shelly.Reboot")
         deadline = time.monotonic() + self.reboot_timeout
         went_down = False
         while time.monotonic() < deadline:
             await asyncio.sleep(1)
+            target = await self._answering(addresses)
+            if target is None:
+                went_down = True
+                continue
+            self._target = target
             try:
                 uptime = await self._uptime()
             except DeviceError:

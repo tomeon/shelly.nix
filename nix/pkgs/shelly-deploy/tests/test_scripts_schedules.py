@@ -124,7 +124,7 @@ def test_ambiguous_script_names(device, deploy):
         "diff",
         {
             "porch": entry(
-                device.address, scripts={"motion": {"code": "", "enable": True}}
+                device.address, scripts={"motion": {"code": "x()", "enable": True}}
             )
         },
     )
@@ -207,6 +207,10 @@ def test_schedules_are_replaced(device, deploy):
     code, out = deploy("switch", devices)
     assert code == 0, out
     assert [normalise_job(job) for job in device.jobs] == JOBS
+    # The existing job was updated in place, not deleted and recreated.
+    assert device.jobs[0]["id"] == 99
+    assert calls(device, "Schedule.DeleteAll") == []
+    assert calls(device, "Schedule.Delete") == []
 
     deletes = len(calls(device, "Schedule.DeleteAll"))
     code, out = deploy("switch", devices)
@@ -286,3 +290,81 @@ def test_apply_order(device, deploy):
     code, out = deploy("switch", devices)
     assert code == 0, out
     assert "applied switch:0, script motion, schedules, wifi" in out
+
+
+def job(timespec, method="Switch.Toggle", **params):
+    return {
+        "enable": True,
+        "timespec": timespec,
+        "calls": [{"method": method, "params": params}],
+    }
+
+
+def test_a_failed_schedule_change_restores_the_previous_jobs(device, deploy):
+    device.jobs = [
+        {"id": 1, **job("0 0 7 * * *", id=0)},
+        {"id": 2, **job("0 0 19 * * *", id=0)},
+    ]
+    before = [dict(j) for j in device.jobs]
+    # The second job's timespec is refused by the device, after the first job
+    # has already been updated.
+    desired = [job("0 0 8 * * *", id=0), job("not a timespec", id=0)]
+    code, out = deploy("switch", {"porch": entry(device.address, schedules=desired)})
+    assert code == 1
+    assert "Invalid timespec 'not a timespec'!" in out
+    assert "the previous jobs were restored" in out
+    assert [normalise_job(j) for j in device.jobs] == [normalise_job(j) for j in before]
+    assert [j["id"] for j in device.jobs] == [1, 2]
+
+
+def test_a_failed_schedule_creation_is_undone(device, deploy):
+    device.jobs = [{"id": 1, **job("0 0 7 * * *", id=0)}]
+    desired = [job("0 0 7 * * *", id=0), job("0 0 9 * * *"), job("bad")]
+    code, out = deploy("switch", {"porch": entry(device.address, schedules=desired)})
+    assert code == 1
+    assert "the previous jobs were restored" in out
+    assert [j["id"] for j in device.jobs] == [1]
+
+
+def test_leftover_jobs_are_deleted_last(device, deploy):
+    device.jobs = [{"id": i, **job(f"0 0 {i} * * *")} for i in (1, 2, 3)]
+    code, out = deploy(
+        "switch", {"porch": entry(device.address, schedules=[job("0 0 1 * * *")])}
+    )
+    assert code == 0, out
+    assert [j["id"] for j in device.jobs] == [1]
+    assert [m for m in calls(device, "Schedule.") if m != "Schedule.List"] == [
+        "Schedule.Delete",
+        "Schedule.Delete",
+    ]
+
+
+def test_replacing_a_full_schedule_table_fits(device, deploy):
+    # Updating in place never needs room for more than the larger of the old
+    # and new job lists, so a full table can be replaced.
+    device.jobs = [{"id": i, **job(f"0 {i} 1 * * *")} for i in range(1, 21)]
+    desired = [job(f"0 {i} 2 * * *") for i in range(1, 21)]
+    code, out = deploy("switch", {"porch": entry(device.address, schedules=desired)})
+    assert code == 0, out
+    assert [normalise_job(j) for j in device.jobs] == desired
+
+
+def test_too_many_jobs_are_refused_before_changing_anything(device, deploy):
+    device.jobs = [{"id": 1, **job("0 0 7 * * *")}]
+    desired = [job(f"0 {i} 2 * * *") for i in range(21)]
+    code, out = deploy("switch", {"porch": entry(device.address, schedules=desired)})
+    assert code == 1
+    assert "21 jobs declared; devices take at most 20" in out
+    assert [m for m in calls(device, "Schedule.") if m != "Schedule.List"] == []
+
+
+def test_jobs_with_too_many_calls_are_refused_before_changing_anything(device, deploy):
+    many = {
+        "enable": True,
+        "timespec": "@sunset",
+        "calls": [{"method": "Switch.Toggle", "params": {}}] * 6,
+    }
+    code, out = deploy("switch", {"porch": entry(device.address, schedules=[many])})
+    assert code == 1
+    assert "makes 6 calls; devices take at most 5" in out
+    assert [m for m in calls(device, "Schedule.") if m != "Schedule.List"] == []

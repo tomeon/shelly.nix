@@ -193,7 +193,7 @@
         (withDevice {
           scripts.motion.code = "print(1)";
           scripts.idle = {
-            code = "";
+            code = "// idle";
             enable = false;
           };
           schedules = [
@@ -232,7 +232,7 @@
             enable = true;
           };
           idle = {
-            code = "";
+            code = "// idle";
             enable = false;
           };
         };
@@ -266,6 +266,35 @@
     testScheduleNeedsCalls = {
       expr = throws (withDevice {schedules = [{timespec = "* * * * * *";}];}).build.manifest;
       expected = true;
+    };
+
+    testEmptyScriptRejected = {
+      expr = throws (withDevice {scripts.empty.code = "";}).build.manifest;
+      expected = true;
+    };
+
+    testTooManyScheduleJobs = {
+      expr = failedAssertions (withDevice {
+        schedules =
+          lib.genList (i: {
+            timespec = "0 ${toString i} * * * *";
+            calls = [{method = "Shelly.Reboot";}];
+          })
+          21;
+      });
+      expected = ["fleet.devices.d.schedules: devices take at most 20 jobs."];
+    };
+
+    testTooManyScheduleCalls = {
+      expr = failedAssertions (withDevice {
+        schedules = [
+          {
+            timespec = "@sunset";
+            calls = lib.genList (_: {method = "Switch.Toggle";}) 6;
+          }
+        ];
+      });
+      expected = ["fleet.devices.d.schedules.0.calls: devices take at most 5 calls per job."];
     };
 
     testScriptComponentsRejected = {

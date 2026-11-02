@@ -129,7 +129,7 @@ Options live under namespaces. The `fleet` namespace holds devices:
 | `fleet.devices.<name>.auth.passwordFile` | The device's `admin` password, read at deploy time. |
 | `fleet.devices.<name>.components.<key>` | Component configuration, keyed `sys`, `mqtt`, `switch:0` and so on: the `config` object of the component's `SetConfig` call, as in the [Gen2+ API documentation](https://shelly-api-docs.shelly.cloud/gen2/). |
 | `fleet.devices.<name>.scripts.<script>` | A script, by its name on the device: `code`, and `enable` (default true) for whether it runs, now and at boot. |
-| `fleet.devices.<name>.schedules` | Scheduled jobs (`enable`, `timespec`, `calls`). Null (the default) leaves the device's schedules alone; a list, even an empty one, replaces them. |
+| `fleet.devices.<name>.schedules` | Scheduled jobs (`enable`, `timespec`, `calls`; at most 20 jobs of at most 5 calls). Null (the default) leaves the device's schedules alone; a list, even an empty one, replaces them. |
 | `fleet.devices.<name>.deployment.reboot` | `"if-required"` (default) reboots when a change reports `restart_required`; `"never"` doesn't. |
 | `fleet.devices.<name>.deployment.allowNetworkChanges` | Must be set to manage `wifi` or `eth`, where a mistake can leave the device unreachable. |
 
@@ -167,20 +167,34 @@ DEVICES: --on NAMES,GLOBS,@TAGS (repeatable) --parallel N --timeout S
 1. It resolves the address, then checks that the device is Gen2 or newer and,
    if `mac` is set, that its MAC matches.
 2. It reads `Shelly.GetConfig` and compares the declared fields.
-3. It applies what differs, in this order: components (`SetConfig`), scripts
-   (created if missing, code uploaded in chunks, started or stopped), schedules
-   (replaced), and finally `wifi` and `eth`.
-4. It reboots once if any change reported `restart_required` and waits for the
+3. It applies what differs, in this order:
+   - components (`SetConfig`);
+   - scripts: created if missing, code uploaded in chunks, then started or
+     stopped;
+   - schedules: existing jobs updated in place and missing ones created. If
+     that fails, what was done is undone. Leftover jobs are deleted only after
+     everything else has succeeded, so a failure never loses a job;
+   - finally `wifi` and `eth`.
+4. After network changes, it waits for the device to reconnect. Devices
+   reconnect about a second after storing new WiFi settings, and may not even
+   answer the call that changed them. It looks for the device at its declared
+   address (resolved again) and at any static IP the change gives it,
+   accepting only a device with the same MAC. If the device now answers
+   elsewhere, it says so: update `address`.
+5. It reboots once if any change reported `restart_required` and waits for the
    device to come back.
-5. It reads the configuration again and fails if any change did not take
+6. It reads the configuration again and fails if any change did not take
    effect.
 
 A failure on one device does not stop the others; the exit status is 1 if any
 device failed, and 2 for problems with the configuration itself.
 
-Devices do not report some fields, passwords among them, so these cannot be
-compared. A component whose only differences might lie in such fields is
-marked `?` and sent only with `--force`.
+Write-only fields cannot be compared, because devices never report them:
+`mqtt.pass` and `wifi.{ap,sta,sta1}.pass`, plus any value given as a
+`_secret`. A component whose only differences might lie in such fields is
+marked `?` and sent only with `--force`. Any other declared field that the
+device does not report counts as a change. If it is still missing after
+switching, for example because it is misspelt, verification fails.
 
 `shelly-deploy` talks to devices with shelly-manager-core's RPC client, which
 handles digest authentication. It needs no shelly-manager server or database.

@@ -49,8 +49,9 @@ class DeviceSpec:
                 raise TypeError("component configurations must be objects")
             scripts = raw.get("scripts") or {}
             for script in scripts.values():
-                if not isinstance(script["code"], str):
-                    raise TypeError("script code must be a string")
+                if not isinstance(script["code"], str) or not script["code"]:
+                    # Script.PutCode takes no empty code.
+                    raise TypeError("script code must be a non-empty string")
             schedules = raw.get("schedules")
             if schedules is not None:
                 for job in schedules:

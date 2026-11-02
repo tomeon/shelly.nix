@@ -14,6 +14,11 @@
   # Components whose misconfiguration can leave a device unreachable.
   networkComponents = ["wifi" "eth"];
 
+  # Shelly's limits on schedules; see
+  # https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/Schedule
+  maxScheduleJobs = 20;
+  maxScheduleCalls = 5;
+
   isStorePath = lib.hasPrefix "${builtins.storeDir}/";
 
   # Every `{ _secret = ...; }` placeholder in a value, as `{ path; secret; }`.
@@ -41,6 +46,16 @@
       message = "${where}.components: `${key}` is not a component key (expected e.g. `sys`, `mqtt` or `switch:0`).";
     })
     componentKeys
+    ++ [
+      {
+        assertion = device.schedules == null || lib.length device.schedules <= maxScheduleJobs;
+        message = "${where}.schedules: devices take at most ${toString maxScheduleJobs} jobs.";
+      }
+    ]
+    ++ lib.imap0 (i: job: {
+      assertion = lib.length job.calls <= maxScheduleCalls;
+      message = "${where}.schedules.${toString i}.calls: devices take at most ${toString maxScheduleCalls} calls per job.";
+    }) (lib.optionals (device.schedules != null) device.schedules)
     ++ map (key: {
       assertion = !(lib.hasPrefix "script:" key);
       message = "${where}.components.${key}: manage scripts with `${where}.scripts.<name>` instead.";

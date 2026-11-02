@@ -8,18 +8,36 @@ from typing import Any
 import pytest
 from fake_shelly import FakeShelly, serve
 from shelly_deploy import cli
+from shelly_deploy import device as device_module
+
+
+@pytest.fixture(autouse=True)
+def quick_reconnects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Look for reconnecting devices sooner than real devices need.
+
+    As with real devices, the fake starts reconnecting (after 0.2s) before
+    shelly-deploy looks for it again.
+    """
+    monkeypatch.setattr(device_module, "RECONNECT_DELAY", 0.5)
 
 
 @pytest.fixture
 def make_device() -> Iterator[Callable[..., FakeShelly]]:
-    """Start fake devices; each gets an `address` attribute."""
+    """Start fake devices; each gets `address` and `port` attributes.
+
+    `hosts` are the local addresses the device is served on, all with the same
+    port; the first is its `address`.
+    """
     servers = []
 
-    def make(**kwargs: Any) -> FakeShelly:
+    def make(*, hosts: tuple[str, ...] = ("127.0.0.1",), **kwargs: Any) -> FakeShelly:
         device = FakeShelly(**kwargs)
-        server = serve(device)
-        servers.append(server)
-        device.address = f"127.0.0.1:{server.server_address[1]}"
+        first = serve(device, hosts[0])
+        port = first.server_address[1]
+        servers.append(first)
+        servers.extend(serve(device, host, port) for host in hosts[1:])
+        device.address = f"{hosts[0]}:{port}"
+        device.port = port
         return device
 
     yield make

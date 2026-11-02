@@ -1,8 +1,10 @@
 """Comparing declared component configuration with what a device reports.
 
-Only declared fields are compared.  A declared field the device does not
-report, such as a password, cannot be checked; it is "unreported", and such a
-component is only re-sent when asked to (`switch --force`).
+Only declared fields are compared.  Write-only fields (passwords, and any value
+given as a `_secret`) are not reported by devices, so they cannot be checked:
+they are "unreported", and a component whose only possible differences lie in
+them is re-sent only when asked to (`switch --force`).  Any other declared
+field the device does not report is a change.
 """
 
 from __future__ import annotations
@@ -14,6 +16,23 @@ from typing import Any
 
 FieldPath = tuple[str, ...]
 
+# Fields that SetConfig accepts but GetConfig never returns, by component type,
+# as documented at https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/
+WRITE_ONLY: dict[str, frozenset[FieldPath]] = {
+    "mqtt": frozenset({("pass",)}),
+    "wifi": frozenset({("ap", "pass"), ("sta", "pass"), ("sta1", "pass")}),
+}
+
+
+class _Absent:
+    """What a field the device does not report "is"."""
+
+    def __repr__(self) -> str:
+        return "(absent)"
+
+
+ABSENT: Any = _Absent()
+
 
 class SecretError(Exception):
     """A secret file could not be read."""
@@ -22,9 +41,11 @@ class SecretError(Exception):
 def read_secret(path: str) -> str:
     """A secret file's contents, without trailing newlines."""
     try:
-        return Path(path).read_text().rstrip("\r\n")
+        return Path(path).read_text(encoding="utf-8").rstrip("\r\n")
     except OSError as e:
         raise SecretError(f"cannot read secret {path}: {e.strerror}") from e
+    except UnicodeDecodeError as e:
+        raise SecretError(f"cannot read secret {path}: not valid UTF-8") from e
 
 
 def resolve_secrets(value: Any) -> tuple[Any, frozenset[FieldPath]]:
@@ -71,6 +92,8 @@ class Change:
 
     def describe(self) -> str:
         def show(value: Any) -> str:
+            if value is ABSENT:
+                return "(absent)"
             return "<secret>" if self.secret else json.dumps(value, sort_keys=True)
 
         return f"{'.'.join(self.path)}: {show(self.old)} -> {show(self.new)}"
@@ -82,6 +105,7 @@ class ComponentPlan:
 
     key: str
     desired: dict[str, Any]
+    current: Any = None
     changes: list[Change] = field(default_factory=list)
     unreported: list[FieldPath] = field(default_factory=list)
 
@@ -97,7 +121,8 @@ class ComponentPlan:
 def plan_component(key: str, declared: dict[str, Any], current: Any) -> ComponentPlan:
     """Compare a component's declared configuration with the device's."""
     desired, secrets = resolve_secrets(declared)
-    plan = ComponentPlan(key=key, desired=desired)
+    plan = ComponentPlan(key=key, desired=desired, current=current)
+    write_only = WRITE_ONLY.get(key.partition(":")[0], frozenset())
 
     def is_secret(path: FieldPath) -> bool:
         return any(s[: len(path)] == path or path[: len(s)] == s for s in secrets)
@@ -107,8 +132,12 @@ def plan_component(key: str, declared: dict[str, Any], current: Any) -> Componen
             for k, v in want.items():
                 if k in have:
                     compare(v, have[k], (*path, k))
-                else:
+                elif (*path, k) in write_only or is_secret((*path, k)):
                     plan.unreported.append((*path, k))
+                else:
+                    plan.changes.append(
+                        Change((*path, k), ABSENT, v, is_secret((*path, k)))
+                    )
         elif not same(want, have):
             plan.changes.append(Change(path, have, want, is_secret(path)))
 
@@ -191,6 +220,8 @@ class SchedulePlan:
 
     desired: list[dict[str, Any]]
     current: list[dict[str, Any]]
+    # The device's ids for the `current` jobs, in the same order.
+    current_ids: list[Any] = field(default_factory=list)
 
     @property
     def status(self) -> str:
@@ -221,7 +252,9 @@ def plan_schedules(declared: list[dict[str, Any]], current: Any) -> SchedulePlan
     """Compare declared schedule jobs with the device's `Schedule.List` jobs."""
     desired, _ = resolve_secrets(declared)
     jobs = current.get("jobs") if isinstance(current, dict) else None
+    jobs = [job for job in jobs or [] if isinstance(job, dict)]
     return SchedulePlan(
         desired=[normalise_job(job) for job in desired],
-        current=[normalise_job(job) for job in jobs or [] if isinstance(job, dict)],
+        current=[normalise_job(job) for job in jobs],
+        current_ids=[job.get("id") for job in jobs],
     )
