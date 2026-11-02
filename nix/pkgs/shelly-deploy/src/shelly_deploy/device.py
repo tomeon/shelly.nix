@@ -428,7 +428,15 @@ class Device:
         reached_at = self._target
         addresses = [self.spec.address, *self._static_addresses(network)]
         deadline = time.monotonic() + self.reboot_timeout
-        for component in network:
+        for index, component in enumerate(network):
+            if index:
+                # The last change may have moved the device, and something
+                # else may answer at its old address: find it again (by MAC)
+                # before sending the next one.
+                await asyncio.sleep(RECONNECT_DELAY)
+                await self._find(
+                    addresses, deadline, f"changing {network[index - 1].key}"
+                )
             try:
                 await send(component)
             except DeviceError as e:

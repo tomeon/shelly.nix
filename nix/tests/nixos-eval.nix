@@ -79,6 +79,14 @@
       expected = none;
     };
 
+    testProxyOnUnixSocket = {
+      expr = complaints {
+        imports = [apiAndWeb];
+        services.nginx.virtualHosts.nixos.listen = [{addr = "unix:/run/nginx/shelly.sock";}];
+      };
+      expected = none;
+    };
+
     testProxyOnNoAddressMeansAllAddresses = {
       expr =
         (complaints {
@@ -149,6 +157,18 @@
           };
         }).failed) ["127.0.0.999" "127.000.0.1" "127.0.0.01" "127.0.0.1.lan"];
       expected = [1 1 1 1];
+    };
+
+    # uvicorn's --host takes no socket path: it is looked up as a name.
+    testApiOnUnixLookingHostName = {
+      expr =
+        (complaints {
+          services.shelly-manager.api = {
+            enable = true;
+            listenAddress = "unix:api";
+          };
+        }).failed;
+      expected = ["services.shelly-manager.api: the API listens on unix:api without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
     };
 
     testApiOnLoopbackAddressBounds = {

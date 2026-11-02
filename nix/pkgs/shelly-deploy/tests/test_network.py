@@ -1,5 +1,7 @@
 """Network changes: reconnection, lost answers, and devices that move."""
 
+import copy
+
 from conftest import entry
 from fake_shelly import FakeShelly
 
@@ -88,6 +90,37 @@ def test_another_device_at_the_old_address_is_not_mistaken_for_it(make_device, d
     assert "Shelly.GetDeviceInfo" in impostor.state()["calls"]
     assert "Shelly.GetConfig" not in impostor.state()["calls"]
     assert f"the device now answers at 127.0.0.2:{device.port}" in out
+
+
+def test_a_second_network_change_follows_the_device(make_device, deploy):
+    # Eth moves the device at once, and another device takes its old address;
+    # WiFi, changed next, must reach the device itself.
+    device = make_device(
+        hosts=("127.0.0.1", "127.0.0.2"),
+        ip="127.0.0.1",
+        reconnect_after=0,
+        reconnect_seconds=0,
+    )
+    device.config["eth"] = {"enable": True, "ipv4mode": "dhcp", "ip": None}
+    impostor = FakeShelly(mac="112233445566")
+    impostor.config["wifi"] = copy.deepcopy(device.config["wifi"])
+    device.successor = impostor
+    code, out = deploy(
+        "switch",
+        {
+            "porch": entry(
+                device.address,
+                components={
+                    "eth": {"ipv4mode": "static", "ip": "127.0.0.2"},
+                    "wifi": {"sta": {"ssid": "other"}},
+                },
+                deployment={"allowNetworkChanges": True},
+            )
+        },
+    )
+    assert code == 0, out
+    assert device.config["wifi"]["sta"]["ssid"] == "other"
+    assert "Wifi.SetConfig" not in impostor.state()["calls"]
 
 
 def test_an_http_error_is_not_mistaken_for_a_reconnect(device, deploy):

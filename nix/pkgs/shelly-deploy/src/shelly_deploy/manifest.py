@@ -21,6 +21,17 @@ class ManifestError(Exception):
     """The manifest could not be produced, or does not make sense."""
 
 
+REBOOT_POLICIES = ("if-required", "never")
+
+
+def _flag(section: Any, key: str, default: bool) -> bool:
+    """A boolean setting: `bool()` would read the string "false" as true."""
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} must be true or false")
+    return value
+
+
 @dataclass(frozen=True)
 class DeviceSpec:
     """One device's entry in the manifest."""
@@ -57,6 +68,10 @@ class DeviceSpec:
                 for job in schedules:
                     if not isinstance(job["timespec"], str) or not job["calls"]:
                         raise TypeError("schedule jobs need a timespec and calls")
+                    _flag(job, "enable", True)
+            reboot = deployment.get("reboot", "if-required")
+            if reboot not in REBOOT_POLICIES:
+                raise TypeError(f"reboot must be one of {', '.join(REBOOT_POLICIES)}")
             return cls(
                 name=name,
                 address=raw["address"],
@@ -64,14 +79,12 @@ class DeviceSpec:
                 tags=tuple(raw.get("tags") or ()),
                 password_file=auth.get("passwordFile"),
                 components=components,
-                reboot=deployment.get("reboot", "if-required"),
-                allow_network_changes=bool(
-                    deployment.get("allowNetworkChanges", False)
-                ),
+                reboot=reboot,
+                allow_network_changes=_flag(deployment, "allowNetworkChanges", False),
                 scripts={
                     script_name: {
                         "code": script["code"],
-                        "enable": bool(script.get("enable", True)),
+                        "enable": _flag(script, "enable", True),
                     }
                     for script_name, script in scripts.items()
                 },

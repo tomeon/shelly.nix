@@ -27,11 +27,12 @@ moduleWithSystem ({config, ...} @ perSystem: {
     else if vhost.listenAddresses != []
     then vhost.listenAddresses
     else nginx.defaultListenAddresses;
-  # Given no address, nginx listens on all of them.
+  # Given no address, nginx listens on all of them.  `unix:` addresses are
+  # sockets, reachable only from this machine.
   exposed =
     if listenAddresses == []
     then ["*"]
-    else lib.filter (address: !isLoopback address) listenAddresses;
+    else lib.filter (address: !(isLoopback address || lib.hasPrefix "unix:" address)) listenAddresses;
 
   apiHost = let
     address = api.listenAddress;

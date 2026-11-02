@@ -177,12 +177,12 @@ DEVICES: --on NAMES,GLOBS,@TAGS (repeatable) --parallel N --timeout S
      succeeded. A failure therefore never loses a job the configuration keeps,
      but a failed deletion can leave only some of the leftovers deleted;
    - finally `wifi` and `eth`.
-4. After network changes, it waits for the device to reconnect. Devices
-   reconnect about a second after storing new WiFi settings, and may not even
-   answer the call that changed them. It looks for the device at its declared
-   address (resolved again) and at any static IP the change gives it,
-   accepting only a device with the same MAC. If the device now answers
-   elsewhere, it says so: update `address`.
+4. After each network change, it waits for the device to reconnect, before
+   sending the next one. Devices reconnect about a second after storing new
+   WiFi settings, and may not even answer the call that changed them. It looks
+   for the device at its declared address (resolved again) and at any static
+   IP the changes give it, accepting only a device with the same MAC. If the
+   device now answers elsewhere, it says so: update `address`.
 5. It reboots once if any change reported `restart_required` and waits for the
    device to come back.
 6. It reads the configuration again and fails if any change did not take

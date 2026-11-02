@@ -39,6 +39,27 @@ def test_parse_sorts_and_normalises():
             "devices": {"a": entry("x", schedules=[{"timespec": "x", "calls": []}])},
         },
         {"version": 1, "devices": {"a": entry("x", schedules=[{"calls": [{}]}])}},
+        # Flags are booleans, not strings that happen to be truthy.
+        {
+            "version": 1,
+            "devices": {"a": entry("x", deployment={"allowNetworkChanges": "false"})},
+        },
+        {
+            "version": 1,
+            "devices": {
+                "a": entry("x", scripts={"s": {"code": "x", "enable": "false"}})
+            },
+        },
+        {
+            "version": 1,
+            "devices": {
+                "a": entry(
+                    "x",
+                    schedules=[{"enable": "false", "timespec": "x", "calls": [{}]}],
+                )
+            },
+        },
+        {"version": 1, "devices": {"a": entry("x", deployment={"reboot": "no"})}},
     ],
 )
 def test_parse_rejects_malformed_manifests(document):
