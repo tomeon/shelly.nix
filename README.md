@@ -172,8 +172,10 @@ DEVICES: --on NAMES,GLOBS,@TAGS (repeatable) --parallel N --timeout S
    - scripts: created if missing, code uploaded in chunks, then started or
      stopped;
    - schedules: existing jobs updated in place and missing ones created. If
-     that fails, what was done is undone. Leftover jobs are deleted only after
-     everything else has succeeded, so a failure never loses a job;
+     that fails, what was done is undone. Leftover jobs, the ones the
+     configuration drops, are deleted one by one only after that has
+     succeeded. A failure therefore never loses a job the configuration keeps,
+     but a failed deletion can leave only some of the leftovers deleted;
    - finally `wifi` and `eth`.
 4. After network changes, it waits for the device to reconnect. Devices
    reconnect about a second after storing new WiFi settings, and may not even

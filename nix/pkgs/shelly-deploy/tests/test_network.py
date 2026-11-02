@@ -1,6 +1,7 @@
 """Network changes: reconnection, lost answers, and devices that move."""
 
 from conftest import entry
+from fake_shelly import FakeShelly
 
 
 def wifi(device, sta, **overrides):
@@ -77,12 +78,16 @@ def test_a_device_that_does_not_come_back_is_reported(make_device, deploy):
 def test_another_device_at_the_old_address_is_not_mistaken_for_it(make_device, deploy):
     device = make_device(hosts=("127.0.0.1", "127.0.0.2"), ip="127.0.0.1")
     # Once the device has moved, a different device answers at its old address.
-    impostor = make_device(hosts=("127.0.0.1",), mac="112233445566")
-    devices = wifi(device, {"ipv4mode": "static", "ip": "127.0.0.2"})
-    devices["porch"]["address"] = device.address
-    code, out = deploy("switch", devices)
+    impostor = FakeShelly(mac="112233445566")
+    device.successor = impostor
+    code, out = deploy(
+        "switch", wifi(device, {"ipv4mode": "static", "ip": "127.0.0.2"})
+    )
     assert code == 0, out
-    assert impostor.state()["calls"].count("Shelly.GetConfig") == 0
+    # It was asked who it is, and then left alone.
+    assert "Shelly.GetDeviceInfo" in impostor.state()["calls"]
+    assert "Shelly.GetConfig" not in impostor.state()["calls"]
+    assert f"the device now answers at 127.0.0.2:{device.port}" in out
 
 
 def test_an_http_error_is_not_mistaken_for_a_reconnect(device, deploy):

@@ -164,6 +164,8 @@ class FakeShelly:
         self.reconnect_seconds = reconnect_seconds
         # The local address the device answers on; None means any.
         self.ip = ip
+        # Another device, answering at addresses this one has moved away from.
+        self.successor: FakeShelly | None = None
         self.offline: tuple[float, float] | None = None
         self.next_ip: str | None = None
         self.reconnects = 0
@@ -520,8 +522,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def do_GET(self) -> None:
+    def _device(self) -> FakeShelly:
+        """The device answering here: its successor, if it has moved away."""
         device = self.server.device
+        local_ip = self.connection.getsockname()[0]
+        device.is_down(local_ip)  # Catch up on a pending move.
+        if device.successor is not None and device.ip not in (None, local_ip):
+            return device.successor
+        return device
+
+    def do_GET(self) -> None:
+        device = self._device()
         if self.path == "/_test/state":
             self._send_json(200, device.state())
         elif device.is_down(self.connection.getsockname()[0]):
@@ -542,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"code": 404, "message": "Not Found"})
 
     def do_POST(self) -> None:
-        device = self.server.device
+        device = self._device()
         if device.is_down(self.connection.getsockname()[0]):
             # A rebooting (or moved) device does not answer at all.
             self.close_connection = True

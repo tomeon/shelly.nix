@@ -556,9 +556,10 @@ class Device:
         """Make the device's schedule jobs the declared ones.
 
         Existing jobs are updated in place, in order, and missing ones created;
-        if any of that fails, what was done is undone.  Jobs left over are
-        deleted only once everything else has succeeded, so a failure never
-        loses a job the device had.
+        if any of that fails, what was done is undone.  Jobs left over (the
+        ones the configuration drops) are deleted one by one, only once that
+        has succeeded: a failure never loses a job the configuration keeps,
+        though a failed deletion leaves only some leftovers deleted.
         """
         if len(plan.desired) > MAX_SCHEDULE_JOBS:
             raise DeviceError(

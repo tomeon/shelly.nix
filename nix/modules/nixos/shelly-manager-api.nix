@@ -136,6 +136,11 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    warnings = lib.optional (cfg.openFirewall && cfg.authTokenFile == null) ''
+      services.shelly-manager.api.openFirewall exposes the API without
+      authentication; set services.shelly-manager.api.authTokenFile.
+    '';
+
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
 
     systemd.services.shelly-manager-api = {

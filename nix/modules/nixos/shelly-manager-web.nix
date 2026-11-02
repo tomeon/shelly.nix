@@ -89,6 +89,11 @@ in {
       }
     ];
 
+    warnings = lib.optional (cfg.openFirewall && proxyApi && api.authTokenFile == null) ''
+      services.shelly-manager.web.openFirewall exposes the API (proxied at /api)
+      without authentication; set services.shelly-manager.api.authTokenFile.
+    '';
+
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [80 443];
 
     services.nginx = {

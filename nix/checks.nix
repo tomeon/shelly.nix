@@ -12,6 +12,7 @@
   }: {
     checks =
       lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        nixos-module-eval = pkgs.callPackage ./tests/nixos-eval.nix {inherit inputs self system;};
         nixos-shelly-deploy = pkgs.testers.runNixOSTest (import ./tests/nixos/shelly-deploy.nix {inherit self;});
         nixos-shelly-manager = pkgs.testers.runNixOSTest (import ./tests/nixos/shelly-manager.nix {inherit self;});
       }
