@@ -79,6 +79,15 @@
       expected = none;
     };
 
+    testProxyOnNoAddressMeansAllAddresses = {
+      expr =
+        (complaints {
+          imports = [apiAndWeb];
+          services.nginx.defaultListenAddresses = [];
+        }).failed;
+      expected = ["services.shelly-manager.web: nixos serves the API (at /api) on * without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
+    };
+
     testRemoteApiIsNotThisMachinesConcern = {
       expr = complaints {
         services.shelly-manager.web = {
@@ -105,6 +114,28 @@
         failed = [apiRefusal];
         warnings = [];
       };
+    };
+
+    testApiOnOtherLoopbackAddress = {
+      expr = complaints {
+        services.shelly-manager.api = {
+          enable = true;
+          listenAddress = "127.0.0.2";
+        };
+      };
+      expected = none;
+    };
+
+    # Host names are not trusted to be loopback, whatever they look like.
+    testApiOnLoopbackLookingHostName = {
+      expr =
+        (complaints {
+          services.shelly-manager.api = {
+            enable = true;
+            listenAddress = "127.office.lan";
+          };
+        }).failed;
+      expected = ["services.shelly-manager.api: the API listens on 127.office.lan without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
     };
 
     testApiOnNetworkWithToken = {

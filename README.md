@@ -227,6 +227,15 @@ Limitations:
     hostName = "shelly.lan";
     openFirewall = true;
   };
+
+  # The interface sends the token with every request: use it over HTTPS.
+  # `addSSL` keeps plain HTTP for devices fetching firmware, which needs no
+  # token; `forceSSL` would redirect them too.
+  services.nginx.virtualHosts."shelly.lan" = {
+    addSSL = true;
+    sslCertificate = "/var/lib/certs/shelly.lan.crt";
+    sslCertificateKey = "/var/lib/certs/shelly.lan.key";
+  };
 }
 ```
 
@@ -244,10 +253,13 @@ Limitations:
     interface uses its own origin, so no CORS setup is needed.
 - **Unauthenticated access is refused.** If no `api.authTokenFile` is set, the
   API must be reachable from this machine only, or evaluation fails. It is
-  reachable from elsewhere when `api.listenAddress` is not a loopback address,
-  or when the web interface proxies `/api` on one; the firewall is not taken
-  into account. Set `services.shelly-manager.api.allowUnauthenticatedAccess =
+  reachable from elsewhere when `api.listenAddress` is not a numeric loopback
+  address, or when the web interface proxies `/api` on one; the firewall does
+  not count. Set `services.shelly-manager.api.allowUnauthenticatedAccess =
   true` to allow it anyway, for example on a trusted LAN.
+- **The token is only as private as the connection.** Over plain HTTP, anyone
+  on the network path can read it. Serve the interface over HTTPS, as in the
+  example.
 - **`programs.shelly-manager.cli`** installs the `shelly-manager` command.
 
 The package defaults come from this flake's packages for the host's system.
