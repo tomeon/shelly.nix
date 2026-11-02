@@ -13,6 +13,22 @@ moduleWithSystem ({config, ...} @ perSystem: {
 
   proxyApi = cfg.apiUrl == null;
 
+  inherit (import ./lib.nix {inherit lib;}) isLoopback;
+
+  # The addresses nginx serves the virtual host on, in nginx's own order of
+  # precedence (see nixpkgs' nixos/modules/services/web-servers/nginx).
+  nginx = config.services.nginx;
+  vhost = nginx.virtualHosts.${cfg.hostName};
+  listenAddresses =
+    if vhost.listen != []
+    then map (l: l.addr) vhost.listen
+    else if nginx.defaultListen != []
+    then map (l: l.addr) nginx.defaultListen
+    else if vhost.listenAddresses != []
+    then vhost.listenAddresses
+    else nginx.defaultListenAddresses;
+  exposed = lib.filter (address: !isLoopback address) listenAddresses;
+
   apiHost = let
     address = api.listenAddress;
   in
@@ -87,12 +103,11 @@ in {
         assertion = !proxyApi || api.enable;
         message = "services.shelly-manager.web: set `apiUrl`, or enable `services.shelly-manager.api` on this machine.";
       }
+      {
+        assertion = !proxyApi || api.authTokenFile != null || api.allowUnauthenticatedAccess || exposed == [];
+        message = "services.shelly-manager.web: ${cfg.hostName} serves the API (at /api) on ${lib.concatStringsSep ", " exposed} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+      }
     ];
-
-    warnings = lib.optional (cfg.openFirewall && proxyApi && api.authTokenFile == null) ''
-      services.shelly-manager.web.openFirewall exposes the API (proxied at /api)
-      without authentication; set services.shelly-manager.api.authTokenFile.
-    '';
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [80 443];
 

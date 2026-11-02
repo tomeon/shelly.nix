@@ -242,6 +242,12 @@ Limitations:
   `services.nginx.virtualHosts.<hostName>`.
   - Unless `apiUrl` is set, it proxies `/api` to the local API and the
     interface uses its own origin, so no CORS setup is needed.
+- **Unauthenticated access is refused.** If no `api.authTokenFile` is set, the
+  API must be reachable from this machine only, or evaluation fails. It is
+  reachable from elsewhere when `api.listenAddress` is not a loopback address,
+  or when the web interface proxies `/api` on one; the firewall is not taken
+  into account. Set `services.shelly-manager.api.allowUnauthenticatedAccess =
+  true` to allow it anyway, for example on a trusted LAN.
 - **`programs.shelly-manager.cli`** installs the `shelly-manager` command.
 
 The package defaults come from this flake's packages for the host's system.

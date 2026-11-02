@@ -1,4 +1,5 @@
-# Evaluation tests for the NixOS modules' warnings.
+# Evaluation tests for the NixOS modules: unauthenticated API exposure is
+# refused unless explicitly allowed.
 {
   inputs,
   lib,
@@ -6,8 +7,7 @@
   self,
   system,
 }: let
-  warningsOf = module:
-    lib.filter (lib.hasPrefix "services.shelly-manager")
+  evalConfig = module:
     (inputs.nixpkgs.lib.nixosSystem {
       modules = [
         self.nixosModules.default
@@ -19,66 +19,114 @@
         module
       ];
     })
-    .config
-    .warnings;
+    .config;
+
+  ours = lib.filter (lib.hasPrefix "services.shelly-manager");
+
+  # The modules' failed assertions and warnings.
+  complaints = module: let
+    config = evalConfig module;
+  in {
+    failed = ours (map (a: a.message) (lib.filter (a: !a.assertion) config.assertions));
+    warnings = ours config.warnings;
+  };
 
   token = "/run/secrets/shelly-manager-token";
+  apiAndWeb = {
+    services.shelly-manager.api.enable = true;
+    services.shelly-manager.web.enable = true;
+  };
+  webRefusal = "services.shelly-manager.web: nixos serves the API (at /api) on 0.0.0.0 without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+  apiRefusal = "services.shelly-manager.api: the API listens on 0.0.0.0 without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+  none = {
+    failed = [];
+    warnings = [];
+  };
 
   results = lib.runTests {
-    testProxiedApiWithoutTokenWarns = {
-      expr = map (lib.hasPrefix "services.shelly-manager.web.openFirewall") (warningsOf {
-        services.shelly-manager.api.enable = true;
+    testProxiedApiWithoutTokenIsRefused = {
+      expr = complaints {
+        imports = [apiAndWeb];
+        networking.enableIPv6 = false;
+      };
+      expected = {
+        failed = [webRefusal];
+        warnings = [];
+      };
+    };
+
+    testProxiedApiWithToken = {
+      expr = complaints {
+        imports = [apiAndWeb];
+        services.shelly-manager.api.authTokenFile = token;
+      };
+      expected = none;
+    };
+
+    testProxiedApiAllowedWithoutToken = {
+      expr = complaints {
+        imports = [apiAndWeb];
+        services.shelly-manager.api.allowUnauthenticatedAccess = true;
+      };
+      expected = none;
+    };
+
+    testProxyOnLoopbackOnly = {
+      expr = complaints {
+        imports = [apiAndWeb];
+        services.nginx.virtualHosts.nixos.listenAddresses = ["127.0.0.1" "[::1]"];
+      };
+      expected = none;
+    };
+
+    testRemoteApiIsNotThisMachinesConcern = {
+      expr = complaints {
         services.shelly-manager.web = {
           enable = true;
-          openFirewall = true;
-        };
-      });
-      expected = [true];
-    };
-
-    testProxiedApiWithTokenDoesNotWarn = {
-      expr = warningsOf {
-        services.shelly-manager.api = {
-          enable = true;
-          authTokenFile = token;
-        };
-        services.shelly-manager.web = {
-          enable = true;
-          openFirewall = true;
+          apiUrl = "https://shelly-api.example.com";
         };
       };
-      expected = [];
+      expected = none;
     };
 
-    testClosedFirewallDoesNotWarn = {
-      expr = warningsOf {
-        services.shelly-manager.api.enable = true;
-        services.shelly-manager.web.enable = true;
-      };
-      expected = [];
+    testApiOnLoopbackWithoutToken = {
+      expr = complaints {services.shelly-manager.api.enable = true;};
+      expected = none;
     };
 
-    testOpenApiWithoutTokenWarns = {
-      expr = map (lib.hasPrefix "services.shelly-manager.api.openFirewall") (warningsOf {
+    testApiOnNetworkWithoutTokenIsRefused = {
+      expr = complaints {
         services.shelly-manager.api = {
           enable = true;
           listenAddress = "0.0.0.0";
-          openFirewall = true;
         };
-      });
-      expected = [true];
+      };
+      expected = {
+        failed = [apiRefusal];
+        warnings = [];
+      };
     };
 
-    testOpenApiWithTokenDoesNotWarn = {
-      expr = warningsOf {
+    testApiOnNetworkWithToken = {
+      expr = complaints {
         services.shelly-manager.api = {
           enable = true;
           listenAddress = "0.0.0.0";
-          openFirewall = true;
           authTokenFile = token;
         };
       };
-      expected = [];
+      expected = none;
+    };
+
+    testApiOnNetworkAllowedWithoutToken = {
+      expr = complaints {
+        services.shelly-manager.api = {
+          enable = true;
+          listenAddress = "0.0.0.0";
+          allowUnauthenticatedAccess = true;
+        };
+      };
+      expected = none;
     };
   };
 in

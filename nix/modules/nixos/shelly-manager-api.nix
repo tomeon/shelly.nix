@@ -10,6 +10,8 @@ moduleWithSystem ({config, ...} @ perSystem: {
 
   cfg = config.services.shelly-manager.api;
 
+  inherit (import ./lib.nix {inherit lib;}) isLoopback;
+
   stateDir = "/var/lib/shelly-manager";
 
   settingsFormat = pkgs.formats.json {};
@@ -105,7 +107,23 @@ in {
           description = ''
             File holding a shared token that the API and web interface then
             require (`Authorization: Bearer <token>`).  When null, access is
-            not authenticated.
+            not authenticated, and the API may only be reachable from this
+            machine unless `allowUnauthenticatedAccess` is set.
+          '';
+        };
+
+        allowUnauthenticatedAccess = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Allow other machines to reach the API without `authTokenFile`:
+            through a non-loopback `listenAddress`, or through the web
+            interface's `/api` proxy.  Anyone who can reach it can then change
+            and reboot your devices.  Without this, such a configuration is
+            refused.
+
+            (Firmware downloads at `/api/firmware/<id>/download` never require
+            the token: devices fetch them and cannot send it.)
           '';
         };
 
@@ -136,10 +154,12 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    warnings = lib.optional (cfg.openFirewall && cfg.authTokenFile == null) ''
-      services.shelly-manager.api.openFirewall exposes the API without
-      authentication; set services.shelly-manager.api.authTokenFile.
-    '';
+    assertions = [
+      {
+        assertion = cfg.authTokenFile != null || cfg.allowUnauthenticatedAccess || isLoopback cfg.listenAddress;
+        message = "services.shelly-manager.api: the API listens on ${cfg.listenAddress} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+      }
+    ];
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
 
