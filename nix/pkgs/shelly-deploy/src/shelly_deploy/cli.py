@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=90.0,
         metavar="SECONDS",
-        help="how long to wait for a rebooting device (default: 90)",
+        help="how long to wait for a device to come back after a reboot or each network change (default: 90)",
     )
     return parser
 

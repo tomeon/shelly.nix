@@ -123,6 +123,29 @@ def test_a_second_network_change_follows_the_device(make_device, deploy):
     assert "Wifi.SetConfig" not in impostor.state()["calls"]
 
 
+def test_each_network_change_gets_the_whole_reconnect_timeout(make_device, deploy):
+    # Each change keeps the device away for 3s of the 5s allowed: 6s in all.
+    device = make_device(reconnect_seconds=3.0)
+    device.config["eth"] = {"enable": False}
+    code, out = deploy(
+        "switch",
+        {
+            "porch": entry(
+                device.address,
+                components={
+                    "eth": {"enable": True},
+                    "wifi": {"sta": {"ssid": "other"}},
+                },
+                deployment={"allowNetworkChanges": True},
+            )
+        },
+        "--reboot-timeout",
+        "5",
+    )
+    assert code == 0, out
+    assert device.reconnects == 2
+
+
 def test_an_http_error_is_not_mistaken_for_a_reconnect(device, deploy):
     # A device that answers with an HTTP error is reachable: the failure is
     # reported at once, not waited out as a reconnect.  (The second

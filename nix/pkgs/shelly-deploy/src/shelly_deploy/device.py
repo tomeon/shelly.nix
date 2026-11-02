@@ -427,16 +427,12 @@ class Device:
 
         reached_at = self._target
         addresses = [self.spec.address, *self._static_addresses(network)]
-        deadline = time.monotonic() + self.reboot_timeout
         for index, component in enumerate(network):
             if index:
                 # The last change may have moved the device, and something
                 # else may answer at its old address: find it again (by MAC)
                 # before sending the next one.
-                await asyncio.sleep(RECONNECT_DELAY)
-                await self._find(
-                    addresses, deadline, f"changing {network[index - 1].key}"
-                )
+                await self._reconnected(addresses, network[index - 1].key)
             try:
                 await send(component)
             except DeviceError as e:
@@ -446,11 +442,7 @@ class Device:
                     raise
                 result.unanswered.append(component.key)
         if network:
-            # Re-resolved, in case the change moved the device.
-            await asyncio.sleep(RECONNECT_DELAY)
-            await self._find(
-                addresses, deadline, f"changing {', '.join(c.key for c in network)}"
-            )
+            await self._reconnected(addresses, network[-1].key)
 
         if result.restart_required and self.spec.reboot == "if-required":
             await self.reboot(addresses)
@@ -505,6 +497,16 @@ class Device:
             if normalize_mac(str(mac or "")) == self._mac:
                 return target
         return None
+
+    async def _reconnected(self, addresses: list[str], changed: str) -> None:
+        """Wait for the device to reconnect after a network change.
+
+        Each change gets the whole `reboot_timeout`.  The addresses are
+        resolved again, in case the change moved the device.
+        """
+        deadline = time.monotonic() + self.reboot_timeout
+        await asyncio.sleep(RECONNECT_DELAY)
+        await self._find(addresses, deadline, f"changing {changed}")
 
     async def _find(self, addresses: list[str], deadline: float, after: str) -> None:
         """Wait until the device answers at one of the addresses."""
