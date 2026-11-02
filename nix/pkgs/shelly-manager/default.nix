@@ -56,7 +56,6 @@ in
     shelly-manager-api = scope.callPackage ({
       python3Packages,
       lib,
-      testers,
       shelly-manager,
       shelly-manager-core,
       ...
@@ -96,14 +95,6 @@ in
           SCRIPT
           chmod +x "$script"
         '';
-        passthru = {
-          tests = {
-            api = testers.runNixOSTest {
-              nodes.api = _: {
-              };
-            };
-          };
-        };
         meta =
           shelly-manager.meta
           // {
@@ -159,18 +150,23 @@ in
           };
       })) {};
 
+    # A library, not an application, so that it can be used with
+    # `python3.withPackages` and as a dependency of other Python packages.
     shelly-manager-core = scope.callPackage ({
       python3Packages,
       shelly-manager,
       ...
     }:
-      python3Packages.buildPythonApplication (finalAttrs: {
+      python3Packages.buildPythonPackage (finalAttrs: {
         inherit (shelly-manager) src version;
         pname = "${lib.getName shelly-manager}-core";
         sourceRoot = "${finalAttrs.src.name}/packages/core";
         pyproject = true;
         pythonRelaxDeps = true;
         build-system = with python3Packages; [setuptools];
+        # Upstream's pyproject.toml carries a placeholder version (0.1.0).
+        nativeBuildInputs = [python3Packages.pyprojectVersionPatchHook];
+        pythonImportsCheck = ["core"];
         propagatedBuildInputs = with python3Packages; [
           pydantic
           pydantic-settings
@@ -197,26 +193,24 @@ in
     shelly-manager-web = scope.callPackage ({
       buildNpmPackage,
       lib,
-      writeText,
       shelly-manager,
-      viteBaseApiUrl ? "http://localhost:8000",
       ...
     }:
-      buildNpmPackage (finalAttrs: let
-        configJs = writeText "shelly-manager-web-config.js" ''
-          window._env = ${lib.toJSON {
-            VITE_BASE_API_URL = finalAttrs.viteBaseApiUrl;
-          }};
-        '';
-      in {
-        inherit viteBaseApiUrl;
+      buildNpmPackage (finalAttrs: {
         inherit (shelly-manager) src version;
         pname = "${lib.getName shelly-manager}-web";
         sourceRoot = "${finalAttrs.src.name}/packages/web";
         npmDepsHash = "sha256-dU27ZTD9+HHiQSsAlEM9zVVeSBHzJSNxSNnlG5ddZy4=";
-        postInstall = ''
-          ln -sfT ${configJs} $out/lib/node_modules/web/public/config.js
+
+        # The build produces a static single-page app in `dist`; that is all
+        # that needs serving.  `config.js` in it carries upstream's default API
+        # URL (http://localhost:8000); the NixOS module serves its own.
+        installPhase = ''
+          runHook preInstall
+          cp -r dist "$out"
+          runHook postInstall
         '';
+
         meta =
           shelly-manager.meta
           // {
