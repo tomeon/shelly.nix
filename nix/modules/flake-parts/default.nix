@@ -3,8 +3,8 @@
 #   shelly.configurations.home = ./shelly;
 #
 # becomes `flake.shellyConfigurations.home`, which `shelly-deploy` reads
-# (`shelly-deploy switch --flake .#home`), and a check that the configuration
-# evaluates, so that `nix flake check` catches failed assertions.
+# (`shelly-deploy switch --flake .#home`), and, unless `shelly.flakeCheck` is
+# false, a check that the configuration evaluates.
 {
   config,
   lib,
@@ -32,6 +32,16 @@ in {
       '';
     };
 
+    shelly.flakeCheck = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Whether to add a check, `checks.<system>.shelly-<name>`, for each of
+        `shelly.configurations`, so that `nix flake check` catches failed
+        assertions.
+      '';
+    };
+
     flake.shellyConfigurations = mkOption {
       type = types.lazyAttrsOf types.raw;
       default = {};
@@ -49,12 +59,12 @@ in {
       config.shelly.configurations;
 
     perSystem = {pkgs, ...}: {
-      checks = lib.mapAttrs' (name: configuration:
+      checks = lib.mkIf config.shelly.flakeCheck (lib.mapAttrs' (name: configuration:
         lib.nameValuePair "shelly-${name}" (
           pkgs.writeText "shelly-${name}-manifest.json"
           (builtins.toJSON configuration.config.build.manifest)
         ))
-      config.flake.shellyConfigurations;
+      config.flake.shellyConfigurations);
     };
   };
 }

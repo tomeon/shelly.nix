@@ -14,20 +14,20 @@
     };
   };
 
-  eval =
-    inputs.flake-parts.lib.evalFlakeModule {
-      inputs = testInputs;
-      moduleLocation = "${toString ./.}/flake-parts.nix#test-flake";
-    } {
-      imports = [self.flakeModules.default];
-      systems = [system];
-      shelly.configurations = {
-        example.fleet.devices.porch.components."switch:0".name = "Porch";
-        broken.fleet.devices.d.components.wifi.sta.ssid = "unchecked";
-      };
-    };
+  evalFlake = module:
+    (inputs.flake-parts.lib.evalFlakeModule {
+        inputs = testInputs;
+        moduleLocation = "${toString ./.}/flake-parts.nix#test-flake";
+      } {
+        imports = [self.flakeModules.default module];
+        systems = [system];
+        shelly.configurations = {
+          example.fleet.devices.porch.components."switch:0".name = "Porch";
+          broken.fleet.devices.d.components.wifi.sta.ssid = "unchecked";
+        };
+      }).config.flake;
 
-  inherit (eval.config) flake;
+  flake = evalFlake {};
   checks = flake.checks.${system};
 
   results = lib.runTests {
@@ -39,6 +39,11 @@
     testEveryConfigurationGetsACheck = {
       expr = builtins.attrNames checks;
       expected = ["shelly-broken" "shelly-example"];
+    };
+
+    testChecksCanBeLeftOut = {
+      expr = (evalFlake {shelly.flakeCheck = false;}).checks.${system};
+      expected = {};
     };
 
     testFailedAssertionsFailTheCheck = {
