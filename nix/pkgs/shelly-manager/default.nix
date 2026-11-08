@@ -161,12 +161,18 @@ in
         inherit (shelly-manager) src version;
         pname = "${lib.getName shelly-manager}-core";
         sourceRoot = "${finalAttrs.src.name}/packages/core";
+        # SHELLY_SECRET_KEY_FILE and SHELLY_AUTH_TOKEN_FILE, so that secrets
+        # need not be passed in the environment.
+        patches = [./patches/secret-files.patch];
         pyproject = true;
         pythonRelaxDeps = true;
         build-system = with python3Packages; [setuptools];
         # Upstream's pyproject.toml carries a placeholder version (0.1.0).
         nativeBuildInputs = [python3Packages.pyprojectVersionPatchHook];
         pythonImportsCheck = ["core"];
+        nativeCheckInputs = with python3Packages; [pytestCheckHook pytest-asyncio];
+        # The settings tests, which cover the patch; the rest need a network.
+        enabledTestPaths = ["tests/unit/test_settings.py"];
         propagatedBuildInputs = with python3Packages; [
           pydantic
           pydantic-settings
