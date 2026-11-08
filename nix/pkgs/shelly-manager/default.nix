@@ -56,7 +56,6 @@ in
     shelly-manager-api = scope.callPackage ({
       python3Packages,
       lib,
-      testers,
       shelly-manager,
       shelly-manager-core,
       ...
@@ -90,20 +89,27 @@ in
           mkdir -p "''${script%/*}"
           cat > "$script" <<'SCRIPT'
           #!/usr/bin/env python3
+          import os
+          import socket
           import sys
+
           from uvicorn.main import main
+          from uvicorn.server import Server
+
+          # Sockets from systemd socket activation (sd_listen_fds(3)) are
+          # served in place of --host and --port: uvicorn's CLI takes one --fd.
+          if os.environ.get("LISTEN_PID") == str(os.getpid()):
+              count = int(os.environ.get("LISTEN_FDS", "0"))
+              for name in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+                  os.environ.pop(name, None)
+              inherited = [socket.socket(fileno=fd) for fd in range(3, 3 + count)]
+              run = Server.run
+              Server.run = lambda self, sockets=None: run(self, sockets=sockets or inherited)
+
           main(["api.main:app_factory", "--factory", *sys.argv[1:]], prog_name="shelly-manager-api")
           SCRIPT
           chmod +x "$script"
         '';
-        passthru = {
-          tests = {
-            api = testers.runNixOSTest {
-              nodes.api = _: {
-              };
-            };
-          };
-        };
         meta =
           shelly-manager.meta
           // {
@@ -159,18 +165,29 @@ in
           };
       })) {};
 
+    # A library, not an application, so that it can be used with
+    # `python3.withPackages` and as a dependency of other Python packages.
     shelly-manager-core = scope.callPackage ({
       python3Packages,
       shelly-manager,
       ...
     }:
-      python3Packages.buildPythonApplication (finalAttrs: {
+      python3Packages.buildPythonPackage (finalAttrs: {
         inherit (shelly-manager) src version;
         pname = "${lib.getName shelly-manager}-core";
         sourceRoot = "${finalAttrs.src.name}/packages/core";
+        # SHELLY_SECRET_KEY_FILE and SHELLY_AUTH_TOKEN_FILE, so that secrets
+        # need not be passed in the environment.
+        patches = [./patches/secret-files.patch];
         pyproject = true;
         pythonRelaxDeps = true;
         build-system = with python3Packages; [setuptools];
+        # Upstream's pyproject.toml carries a placeholder version (0.1.0).
+        nativeBuildInputs = [python3Packages.pyprojectVersionPatchHook];
+        pythonImportsCheck = ["core"];
+        nativeCheckInputs = with python3Packages; [pytestCheckHook pytest-asyncio];
+        # The settings tests, which cover the patch; the rest need a network.
+        enabledTestPaths = ["tests/unit/test_settings.py"];
         propagatedBuildInputs = with python3Packages; [
           pydantic
           pydantic-settings
@@ -197,26 +214,24 @@ in
     shelly-manager-web = scope.callPackage ({
       buildNpmPackage,
       lib,
-      writeText,
       shelly-manager,
-      viteBaseApiUrl ? "http://localhost:8000",
       ...
     }:
-      buildNpmPackage (finalAttrs: let
-        configJs = writeText "shelly-manager-web-config.js" ''
-          window._env = ${lib.toJSON {
-            VITE_BASE_API_URL = finalAttrs.viteBaseApiUrl;
-          }};
-        '';
-      in {
-        inherit viteBaseApiUrl;
+      buildNpmPackage (finalAttrs: {
         inherit (shelly-manager) src version;
         pname = "${lib.getName shelly-manager}-web";
         sourceRoot = "${finalAttrs.src.name}/packages/web";
         npmDepsHash = "sha256-dU27ZTD9+HHiQSsAlEM9zVVeSBHzJSNxSNnlG5ddZy4=";
-        postInstall = ''
-          ln -sfT ${configJs} $out/lib/node_modules/web/public/config.js
+
+        # The build produces a static single-page app in `dist`; that is all
+        # that needs serving.  `config.js` in it carries upstream's default API
+        # URL (http://localhost:8000); the NixOS module serves its own.
+        installPhase = ''
+          runHook preInstall
+          cp -r dist "$out"
+          runHook postInstall
         '';
+
         meta =
           shelly-manager.meta
           // {

@@ -1,5 +1,5 @@
 {moduleWithSystem}:
-moduleWithSystem ({} @ perSystem: {
+moduleWithSystem ({config, ...} @ perSystem: {
   config,
   lib,
   ...

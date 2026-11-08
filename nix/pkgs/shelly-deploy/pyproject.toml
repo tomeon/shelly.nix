@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shelly-deploy"
+version = "0.1.0"
+description = "Deploy declarative Shelly device configurations"
+requires-python = ">=3.11"
+dependencies = ["shelly-manager-core"]
+
+[project.scripts]
+shelly-deploy = "shelly_deploy.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
