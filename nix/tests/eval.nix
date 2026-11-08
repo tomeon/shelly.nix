@@ -37,6 +37,26 @@
   withDevice = device: eval {fleet.devices.d = device;};
 
   results = lib.runTests {
+    # One module needs no list; other arguments reach `lib.evalModules`.
+    testShellyConfigurationArguments = {
+      expr = let
+        configuration = shellyLib.shellyConfiguration {
+          modules = {name, ...}: {fleet.devices.d.tags = [name];};
+          specialArgs.name = "special";
+          prefix = ["shelly"];
+        };
+      in {
+        inherit (configuration.config.fleet.devices.d) tags;
+        inherit (configuration.options.fleet.devices) loc;
+        inherit (configuration) class;
+      };
+      expected = {
+        tags = ["special"];
+        loc = ["shelly" "fleet" "devices"];
+        class = "shelly";
+      };
+    };
+
     testAddressDefaultsToName = {
       expr = example.fleet.devices.kitchen.address;
       expected = "kitchen";

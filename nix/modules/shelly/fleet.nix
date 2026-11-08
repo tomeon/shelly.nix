@@ -114,13 +114,10 @@ in {
     };
 
     devices = mkOption {
-      type = types.attrsOf (types.submoduleWith {
-        shorthandOnlyDefinesConfig = true;
-        modules = [
-          ./device.nix
-          {imports = [cfg.defaults];}
-        ];
-      });
+      type = types.attrsOf (types.submodule [
+        ./device.nix
+        cfg.defaults
+      ]);
       default = {};
       example = lib.literalExpression ''
         {
