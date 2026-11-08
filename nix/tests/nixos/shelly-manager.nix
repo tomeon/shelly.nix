@@ -2,65 +2,91 @@
 {self}: {
   name = "shelly-manager";
 
-  nodes.machine = {pkgs, ...}: {
+  nodes.machine = {
+    config,
+    pkgs,
+    ...
+  }: {
     imports = [self.nixosModules.default];
 
     services.shelly-manager.api = {
       enable = true;
-      authTokenFile = "/etc/shelly-manager/auth-token";
+      authTokenFile = "/etc/${config.environment.etc."shelly-manager/auth-token".target}";
       settings.network.timeout = 5;
     };
-    services.shelly-manager.web.enable = true;
+    services.shelly-manager.web = {
+      enable = true;
+      serverName = "shelly.test";
+    };
 
+    networking.hosts."127.0.0.1" = [config.services.shelly-manager.web.serverName];
     environment.etc."shelly-manager/auth-token".text = "test-token";
-    environment.systemPackages = [pkgs.curl pkgs.jq];
+    environment.systemPackages = with pkgs; [curl jq];
   };
 
-  testScript = ''
-    def status(url, *args):
-        return machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' {' '.join(args)} {url}").strip()
+  testScript = {nodes, ...}: let
+    inherit (nodes.machine) environment services systemd;
+    service = systemd.services.shelly-manager-api;
+    api = "http://${services.shelly-manager.api.address}:${toString services.shelly-manager.api.port}";
+    web = "http://${services.shelly-manager.web.serverName}";
+  in ''
+    import json
+    import shlex
 
-    auth = "-H 'Authorization: Bearer test-token'"
+    def status(url, *args):
+        return machine.succeed(shlex.join(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", *args, url])).strip()
+
+    def main_process_environment():
+        pid = machine.succeed("systemctl show -p MainPID --value shelly-manager-api").strip()
+        return machine.succeed(f"tr '\\0' '\\n' < /proc/{pid}/environ")
+
+    token = ${builtins.toJSON environment.etc."shelly-manager/auth-token".text}
+    auth = ["-H", f"Authorization: Bearer {token}"]
+    key_file = ${builtins.toJSON service.environment.SHELLY_SECRET_KEY_FILE}
 
     machine.wait_for_unit("shelly-manager-api.service")
-    machine.wait_for_open_port(8000)
+    machine.wait_for_open_port(${toString services.shelly-manager.api.port})
     machine.wait_for_unit("nginx.service")
     machine.wait_for_open_port(80)
 
     with subtest("the API answers, on localhost only"):
-        machine.succeed("curl -sf http://127.0.0.1:8000/api/health | jq -e '.status == \"healthy\"'")
-        machine.succeed("ss -Htln 'sport = :8000' | grep -q '127.0.0.1:8000'")
+        machine.succeed("curl -sf ${api}/api/health | jq -e '.status == \"healthy\"'")
+        machine.succeed("ss -Htln 'sport = :${toString services.shelly-manager.api.port}' | grep -q '${services.shelly-manager.api.address}:'")
 
     with subtest("the auth token is required"):
-        assert status("http://127.0.0.1:8000/api/credentials") == "401"
-        assert status("http://127.0.0.1:8000/api/credentials", auth) == "200"
+        assert status("${api}/api/credentials") == "401"
+        assert status("${api}/api/credentials", *auth) == "200"
+
+    with subtest("secrets are read from files, not passed in the environment"):
+        environ = main_process_environment()
+        assert "SHELLY_AUTH_TOKEN_FILE=" in environ, environ
+        assert token not in environ, environ
+        assert machine.succeed(f"cat {shlex.quote(key_file)}").strip() not in environ, environ
 
     with subtest("the settings file is used"):
-        machine.succeed("systemctl show -p Environment shelly-manager-api | grep -q SHELLY_CONFIG_FILE=")
-        config = machine.succeed("systemctl show -p Environment shelly-manager-api | grep -o 'SHELLY_CONFIG_FILE=[^ ]*' | cut -d= -f2").strip()
-        machine.succeed(f"jq -e '.network.timeout == 5' {config}")
+        machine.succeed("jq -e '.network.timeout == 5' ${service.environment.SHELLY_CONFIG_FILE}")
+
+    with subtest("the firmware directory exists"):
+        machine.succeed("test -d ${service.environment.SHELLY_FIRMWARE_DIR}")
 
     with subtest("the generated secret key is kept, and private"):
-        key = machine.succeed("cat /var/lib/private/shelly-manager/secret-key")
-        machine.succeed("stat -c %a /var/lib/private/shelly-manager/secret-key | grep -qx 600")
-        machine.succeed(
-            f"curl -sf -X POST {auth} -H 'Content-Type: application/json' "
-            "-d '{\"mac\": \"AABBCCDDEEFF\", \"password\": \"pw\"}' "
-            "http://127.0.0.1:8000/api/credentials"
-        )
+        key = machine.succeed(f"cat {shlex.quote(key_file)}")
+        machine.succeed(f"stat -L -c %a {shlex.quote(key_file)} | grep -qx 600")
+        credential = json.dumps({"mac": "AABBCCDDEEFF", "password": "pw"})
+        machine.succeed(shlex.join(["curl", "-sf", "-X", "POST", *auth, "-H", "Content-Type: application/json", "-d", credential, "${api}/api/credentials"]))
         machine.systemctl("restart shelly-manager-api.service")
-        machine.wait_for_open_port(8000)
-        assert key == machine.succeed("cat /var/lib/private/shelly-manager/secret-key")
+        machine.wait_for_open_port(${toString services.shelly-manager.api.port})
+        assert key == machine.succeed(f"cat {shlex.quote(key_file)}")
         # Decrypting the stored credential needs the same key.
-        machine.succeed(f"curl -sf {auth} http://127.0.0.1:8000/api/credentials | jq -e '.[0].mac == \"AABBCCDDEEFF\"'")
+        machine.succeed(shlex.join(["curl", "-sf", *auth, "${api}/api/credentials"]) + " | jq -e '.[0].mac == \"AABBCCDDEEFF\"'")
 
     with subtest("the web interface is served, with the API on the same origin"):
-        machine.succeed("curl -sf http://machine/ | grep -q '<div id=\"root\">'")
-        machine.succeed("curl -sf http://machine/devices/192.168.1.2 | grep -q '<div id=\"root\">'")
-        machine.succeed("curl -sf http://machine/config.js | grep -q 'VITE_BASE_API_URL: window.location.origin'")
-        machine.succeed("curl -sf http://machine/api/health | jq -e '.status == \"healthy\"'")
-        assert status("http://machine/api/credentials") == "401"
-        assert status("http://machine/api/credentials", auth) == "200"
-        assert status("http://machine/docs") == "200"
+        machine.succeed("curl -sf ${web}/ | grep -q '<div id=\"root\">'")
+        machine.succeed("curl -sf ${web}/devices/192.168.1.2 | grep -q '<div id=\"root\">'")
+        machine.succeed("curl -sf ${web}/config.js | grep -q 'VITE_BASE_API_URL: window.location.origin'")
+        machine.succeed("curl -sf ${web}/api/health | jq -e '.status == \"healthy\"'")
+        assert status("${web}/api/credentials") == "401"
+        assert status("${web}/api/credentials", *auth) == "200"
+        assert status("${web}/docs") == "200"
   '';
 }

@@ -15,27 +15,60 @@ moduleWithSystem ({config, ...} @ perSystem: {
 
   inherit (import ./lib.nix {inherit lib;}) isLoopback;
 
-  # The addresses nginx serves the virtual host on, in nginx's own order of
-  # precedence (see nixpkgs' nixos/modules/services/web-servers/nginx).
+  # The virtual host's listen lines ({addr, port, ssl}), as nixpkgs' nginx
+  # module computes them (nixos/modules/services/web-servers/nginx).
   nginx = config.services.nginx;
-  vhost = nginx.virtualHosts.${cfg.hostName};
-  listenAddresses =
+  vhost = nginx.virtualHosts.${cfg.virtualHost};
+  isSocket = lib.hasPrefix "unix:";
+  withDefaultPorts = lines: let
+    complete = ssl: port: line:
+      {
+        port =
+          if isSocket line.addr
+          then null
+          else port;
+        inherit ssl;
+      }
+      // line;
+  in
+    lib.optionals (vhost.onlySSL || vhost.addSSL || vhost.forceSSL || vhost.rejectSSL)
+    (map (complete true nginx.defaultSSLListenPort) (lib.filter (line: line.ssl or true) lines))
+    ++ lib.optionals (!vhost.onlySSL)
+    (map (complete false nginx.defaultHTTPListenPort) (lib.filter (line: !(line.ssl or false)) lines));
+  listen =
     if vhost.listen != []
-    then map (l: l.addr) vhost.listen
+    then vhost.listen
     else if nginx.defaultListen != []
-    then map (l: l.addr) nginx.defaultListen
-    else if vhost.listenAddresses != []
-    then vhost.listenAddresses
-    else nginx.defaultListenAddresses;
-  # Given no address, nginx listens on all of them.  `unix:` addresses are
-  # sockets, reachable only from this machine.
-  exposed =
-    if listenAddresses == []
-    then ["*"]
-    else lib.filter (address: !(isLoopback address || lib.hasPrefix "unix:" address)) listenAddresses;
+    then withDefaultPorts (map (lib.filterAttrs (_: value: value != null)) nginx.defaultListen)
+    else
+      withDefaultPorts (map (addr: {inherit addr;}) (
+        if vhost.listenAddresses != []
+        then vhost.listenAddresses
+        else nginx.defaultListenAddresses
+      ));
+  # Lines reachable from other machines: not on loopback addresses or
+  # sockets.  Given none at all, nginx listens on port 80 of every address.
+  exposedListen =
+    if listen == []
+    then [
+      {
+        addr = "*";
+        port = 80;
+        ssl = false;
+      }
+    ]
+    else lib.filter (line: !(isLoopback line.addr || isSocket line.addr)) listen;
+  exposed = lib.unique (map (line: line.addr) exposedListen);
+  # A listen line without a port listens on port 80.
+  ports = lines:
+    lib.unique (map (line:
+      if line.port == null
+      then 80
+      else line.port)
+    lines);
 
   apiHost = let
-    address = api.listenAddress;
+    inherit (api) address;
   in
     if address == "0.0.0.0"
     then "127.0.0.1"
@@ -70,14 +103,27 @@ in {
           '';
         };
 
-        hostName = mkOption {
+        virtualHost = mkOption {
           type = types.str;
-          default = config.networking.fqdnOrHostName;
-          defaultText = lib.literalExpression "config.networking.fqdnOrHostName";
+          default = "shelly-manager";
+          description = ''
+            Name of the nginx virtual host serving the interface, in
+            `services.nginx.virtualHosts`.  Configure TLS, listen addresses and
+            the like there.
+
+            The default is a name of its own, so that the interface is not
+            merged into another virtual host by accident.
+          '';
+        };
+
+        serverName = mkOption {
+          type = types.nullOr types.str;
+          default = null;
           example = "shelly.example.com";
           description = ''
-            Name of the nginx virtual host serving the interface.  Configure
-            TLS and the like through `services.nginx.virtualHosts.<hostName>`.
+            Host name under which the interface is served: the virtual host's
+            `serverName`.  When null, the virtual host does not set one, and
+            nginx uses `virtualHost`.
           '';
         };
 
@@ -96,7 +142,12 @@ in {
         openFirewall = mkOption {
           type = types.bool;
           default = false;
-          description = "Open TCP ports 80 and 443 in the firewall.";
+          description = ''
+            Open the ports the virtual host listens on in the firewall, other
+            than on loopback addresses and sockets: those of its `listen`
+            lines, or else of nginx's default listen settings.  With `quic`,
+            this includes their UDP ports.
+          '';
         };
       };
     };
@@ -110,15 +161,19 @@ in {
       }
       {
         assertion = !proxyApi || api.authTokenFile != null || api.allowUnauthenticatedAccess || exposed == [];
-        message = "services.shelly-manager.web: ${cfg.hostName} serves the API (at /api) on ${lib.concatStringsSep ", " exposed} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+        message = "services.shelly-manager.web: virtual host ${cfg.virtualHost} serves the API (at /api) on ${lib.concatStringsSep ", " exposed} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
       }
     ];
 
-    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [80 443];
+    networking.firewall = lib.mkIf cfg.openFirewall {
+      allowedTCPPorts = ports exposedListen;
+      allowedUDPPorts = lib.mkIf vhost.quic (ports (lib.filter (line: line.ssl) exposedListen));
+    };
 
     services.nginx = {
       enable = true;
-      virtualHosts.${cfg.hostName} = {
+      virtualHosts.${cfg.virtualHost} = {
+        serverName = lib.mkIf (cfg.serverName != null) cfg.serverName;
         root = cfg.package;
         locations =
           {

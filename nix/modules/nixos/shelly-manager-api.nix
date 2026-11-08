@@ -22,6 +22,8 @@ moduleWithSystem ({config, ...} @ perSystem: {
     cfg.extraArgs;
 
   stateDir = "/var/lib/shelly-manager";
+  # The key generated when `secretKeyFile` is null.
+  generatedKeyFile = "${stateDir}/secret-key";
 
   settingsFormat = pkgs.formats.json {};
 
@@ -29,36 +31,6 @@ moduleWithSystem ({config, ...} @ perSystem: {
     inStore = false;
     absolute = true;
   };
-
-  # Upstream reads its secrets from the environment only.
-  start = pkgs.writeShellScript "shelly-manager-api-start" ''
-    set -eu
-    ${
-      if cfg.secretKeyFile == null
-      then ''
-        key="$STATE_DIRECTORY/secret-key"
-        if [ ! -s "$key" ]; then
-          # A Fernet key: 32 random bytes, URL-safe base64.
-          head -c 32 /dev/urandom | base64 | tr '+/' '-_' >"$key.tmp"
-          mv "$key.tmp" "$key"
-        fi
-      ''
-      else ''
-        key="$CREDENTIALS_DIRECTORY/secret-key"
-      ''
-    }
-    SHELLY_SECRET_KEY=$(cat "$key")
-    export SHELLY_SECRET_KEY
-    ${lib.optionalString (cfg.authTokenFile != null) ''
-      SHELLY_AUTH_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/auth-token")
-      export SHELLY_AUTH_TOKEN
-    ''}
-    # uvicorn takes the last of repeated options: the module's come last.
-    exec ${lib.getExe cfg.package} \
-      ${lib.escapeShellArgs cfg.extraArgs} \
-      --host ${lib.escapeShellArg cfg.listenAddress} \
-      --port ${toString cfg.port}
-  '';
 in {
   options = {
     services.shelly-manager = {
@@ -74,7 +46,7 @@ in {
           '';
         };
 
-        listenAddress = mkOption {
+        address = mkOption {
           type = types.str;
           default = "127.0.0.1";
           example = "0.0.0.0";
@@ -107,6 +79,9 @@ in {
             `openssl rand -base64 32 | tr '+/' '-_'`).  When null, a key is
             generated on first start and kept in ${stateDir}.  Changing the key
             makes existing credentials and backups unreadable.
+
+            The API reads the key from this file (`SHELLY_SECRET_KEY_FILE`), by
+            way of a systemd credential.
           '';
         };
 
@@ -127,13 +102,14 @@ in {
           default = false;
           description = ''
             Allow other machines to reach the API without `authTokenFile`:
-            through a non-loopback `listenAddress`, or through the web
-            interface's `/api` proxy.  Anyone who can reach it can then change
-            and reboot your devices.  Without this, such a configuration is
-            refused.
+            through a non-loopback `address`, or through the web interface's
+            `/api` proxy.  Anyone who can reach it can then change and reboot
+            your devices.  Without this, such a configuration is refused.
 
-            (Firmware downloads at `/api/firmware/<id>/download` never require
-            the token: devices fetch them and cannot send it.)
+            ::: {.note}
+            Firmware downloads at `/api/firmware/<id>/download` never require
+            the token: devices fetch them and cannot send it.
+            :::
           '';
         };
 
@@ -159,8 +135,8 @@ in {
           example = ["--proxy-headers"];
           description = ''
             Extra arguments for uvicorn.  Where the API listens is set with
-            `listenAddress` and `port` alone, so `--host`, `--port`, `--uds`
-            and `--fd` are refused here.
+            `address` and `port` alone, so `--host`, `--port`, `--uds` and
+            `--fd` are refused here.
           '';
         };
       };
@@ -171,35 +147,57 @@ in {
     assertions = [
       {
         assertion = bindingArgs == [];
-        message = "services.shelly-manager.api.extraArgs: ${lib.concatStringsSep ", " bindingArgs} would change where the API listens, past the authentication check; use listenAddress and port.";
+        message = "services.shelly-manager.api.extraArgs: ${lib.concatStringsSep ", " bindingArgs} would change where the API listens, past the authentication check; use address and port.";
       }
       {
-        assertion = cfg.authTokenFile != null || cfg.allowUnauthenticatedAccess || isLoopback cfg.listenAddress;
-        message = "services.shelly-manager.api: the API listens on ${cfg.listenAddress} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+        assertion = cfg.authTokenFile != null || cfg.allowUnauthenticatedAccess || isLoopback cfg.address;
+        message = "services.shelly-manager.api: the API listens on ${cfg.address} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
       }
     ];
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
 
     systemd.services.shelly-manager-api = {
-      description = "shelly-manager API";
+      description = "Shelly Manager API, for discovering, configuring and updating Shelly devices";
       wantedBy = ["multi-user.target"];
       wants = ["network-online.target"];
       after = ["network-online.target"];
-      path = [pkgs.coreutils];
 
+      # The API reads its secrets from these files (patched in; see
+      # nix/pkgs/shelly-manager).  `%d` is the credentials directory.
       environment = {
         SHELLY_CONFIG_FILE = settingsFormat.generate "shelly-manager.json" cfg.settings;
         SHELLY_DATA_DIR = stateDir;
         SHELLY_FIRMWARE_DIR = "${stateDir}/firmware";
+        SHELLY_SECRET_KEY_FILE =
+          if cfg.secretKeyFile != null
+          then "%d/secret-key"
+          else generatedKeyFile;
+        SHELLY_AUTH_TOKEN_FILE = lib.mkIf (cfg.authTokenFile != null) "%d/auth-token";
       };
 
+      # Generate a Fernet key (32 random bytes, URL-safe base64) if there is
+      # none, writing it beside its final name first so that it is never seen
+      # half-written.
+      preStart = lib.mkIf (cfg.secretKeyFile == null) ''
+        key=$SHELLY_SECRET_KEY_FILE
+        if ! [ -s "$key" ]; then
+          tmp=$(mktemp "$(dirname "$key")/.$(basename "$key").XXXXXXXXXX")
+          head -c 32 /dev/urandom | base64 | tr '+/' '-_' >"$tmp"
+          mv "$tmp" "$key"
+        fi
+      '';
+
+      # uvicorn takes the last of repeated options: the module's come last.
+      script = ''
+        exec ${lib.getExe cfg.package} ${lib.escapeShellArgs (cfg.extraArgs ++ ["--host" cfg.address "--port" (toString cfg.port)])}
+      '';
+
       serviceConfig = {
-        ExecStart = start;
         Restart = "on-failure";
 
         DynamicUser = true;
-        StateDirectory = "shelly-manager";
+        StateDirectory = ["shelly-manager" "shelly-manager/firmware"];
         StateDirectoryMode = "0700";
         WorkingDirectory = stateDir;
         UMask = "0077";

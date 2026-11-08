@@ -1,16 +1,24 @@
 # shelly-deploy, end to end: a configuration in a Nix file, evaluated by
 # `shelly-deploy -f`, applied to a fake device with authentication.
-{self}: {
+{self}: let
+  # Where the fake device answers.
+  deviceHost = "porch.lan";
+in {
   name = "shelly-deploy";
 
-  nodes.machine = {pkgs, ...}: let
+  nodes.machine = {
+    config,
+    pkgs,
+    ...
+  }: let
     shelly-deploy = self.packages.${pkgs.stdenv.hostPlatform.system}.shelly-deploy;
+    etc = name: "/etc/${config.environment.etc.${name}.target}";
 
     fleetModule = pkgs.writeText "fleet-module.nix" ''
       {
-        fleet.defaults.auth.passwordFile = "/etc/shelly/admin-password";
+        fleet.defaults.auth.passwordFile = ${builtins.toJSON (etc "shelly/admin-password")};
         fleet.devices.porch = {
-          address = "porch.lan";
+          address = ${builtins.toJSON deviceHost};
           mac = "aa:bb:cc:dd:ee:ff";
           tags = ["outdoor"];
           components = {
@@ -21,7 +29,7 @@
             mqtt = {
               enable = true;
               server = "mqtt.lan:1883";
-              pass._secret = "/etc/shelly/mqtt-password";
+              pass._secret = ${builtins.toJSON (etc "shelly/mqtt-password")};
             };
           };
           scripts.hello.code = "print('hello from shelly.nix');";
@@ -58,11 +66,12 @@
         shelly.shellyConfiguration {modules = [${fleetModule}];}
     '';
   in {
-    networking.hosts."127.0.0.1" = ["porch.lan"];
+    networking.hosts."127.0.0.1" = [deviceHost];
 
+    # The fake device answers on HTTP's port, as Shelly devices do.
     systemd.services.fake-shelly = {
       wantedBy = ["multi-user.target"];
-      serviceConfig.ExecStart = "${pkgs.python3.interpreter} ${shelly-deploy.fakeDevice} --port 80 --password-file /etc/shelly/admin-password";
+      serviceConfig.ExecStart = "${pkgs.python3.interpreter} ${shelly-deploy.fakeDevice} --port 80 --password-file ${etc "shelly/admin-password"}";
     };
 
     environment.etc = {
@@ -74,32 +83,36 @@
     environment.systemPackages = [shelly-deploy pkgs.curl];
   };
 
-  testScript = ''
+  testScript = {nodes, ...}: let
+    inherit (nodes.machine.environment) etc;
+    fleet = "/etc/${etc."shelly/fleet.nix".target}";
+    device = "http://${deviceHost}";
+  in ''
     import json
 
     def device():
-        return json.loads(machine.succeed("curl -sf http://porch.lan/_test/state"))
+        return json.loads(machine.succeed("curl -sf ${device}/_test/state"))
 
     machine.wait_for_unit("fake-shelly.service")
     machine.wait_for_open_port(80)
 
     with subtest("build evaluates the configuration"):
-        manifest = json.loads(machine.succeed("shelly-deploy build -f /etc/shelly/fleet.nix"))
+        manifest = json.loads(machine.succeed("shelly-deploy build -f ${fleet}"))
         assert manifest["devices"]["porch"]["mac"] == "AABBCCDDEEFF", manifest
 
     with subtest("diff shows pending changes and changes nothing"):
-        out = machine.succeed("shelly-deploy diff -f /etc/shelly/fleet.nix")
+        out = machine.succeed("shelly-deploy diff -f ${fleet}")
         assert "~ switch:0" in out, out
         assert "+ script hello" in out, out
         assert "~ schedules (1 job(s))" in out, out
         assert device()["config"]["switch:0"]["name"] is None
 
     with subtest("switch applies the configuration"):
-        out = machine.succeed("shelly-deploy switch -f /etc/shelly/fleet.nix --on @outdoor")
+        out = machine.succeed("shelly-deploy switch -f ${fleet} --on @outdoor")
         state = device()
         assert state["config"]["switch:0"]["name"] == "Porch light", state
         assert state["config"]["switch:0"]["in_mode"] == "follow", state
-        assert state["config"]["mqtt"]["pass"] == "mqtt-secret", state
+        assert state["config"]["mqtt"]["pass"] == ${builtins.toJSON etc."shelly/mqtt-password".text}, state
         assert state["reboots"] == 1, state
         [script] = state["scripts"]
         assert script["name"] == "hello" and script["running"], state
@@ -108,10 +121,10 @@
         assert "secret" not in out, out
 
     with subtest("a second switch changes nothing"):
-        out = machine.succeed("shelly-deploy switch -f /etc/shelly/fleet.nix")
+        out = machine.succeed("shelly-deploy switch -f ${fleet}")
         assert "1 device(s): 0 changed, 1 unchanged, 0 failed" in out, out
 
     with subtest("selecting nothing is an error"):
-        machine.fail("shelly-deploy diff -f /etc/shelly/fleet.nix --on @indoor")
+        machine.fail("shelly-deploy diff -f ${fleet} --on @indoor")
   '';
 }

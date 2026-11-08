@@ -10,7 +10,8 @@ Declarative configuration for [Shelly](https://www.shelly.com/) devices, built o
   change, `switch` changes it, in the spirit of `nixos-rebuild`, colmena and
   deploy-rs.
 - **A flake-parts module** turns `shelly.configurations.<name>` into
-  `shellyConfigurations.<name>` and a `nix flake check` check.
+  `shellyConfigurations.<name>` and a `nix flake check` check (unless
+  `shelly.flakeCheck = false`).
 - **NixOS modules** for the shelly-manager API, web interface and CLI.
 - **Packages**: `shelly-manager` (`-api`, `-cli`, `-core`, `-web`) and
   `shelly-deploy`.
@@ -115,8 +116,9 @@ $ shelly-deploy switch -f fleet.nix
 ## The Shelly module
 
 Evaluate it with `lib.shellyConfiguration {modules = [...];}` (a
-`lib.evalModules` wrapper), with the flake-parts module, or with your own
-`lib.evalModules` call using `modules.shelly.default` and `class = "shelly"`.
+`lib.evalModules` wrapper, which passes `specialArgs` and `prefix` through),
+with the flake-parts module, or with your own `lib.evalModules` call using
+`modules.shelly.default` and `class = "shelly"`.
 
 Options live under namespaces. The `fleet` namespace holds devices:
 
@@ -224,14 +226,14 @@ Limitations:
 
   services.shelly-manager.web = {
     enable = true;
-    hostName = "shelly.lan";
+    serverName = "shelly.lan";
     openFirewall = true;
   };
 
   # The interface sends the token with every request: use it over HTTPS.
   # `addSSL` keeps plain HTTP for devices fetching firmware, which needs no
   # token; `forceSSL` would redirect them too.
-  services.nginx.virtualHosts."shelly.lan" = {
+  services.nginx.virtualHosts.shelly-manager = {
     addSSL = true;
     sslCertificate = "/var/lib/certs/shelly.lan.crt";
     sslCertificateKey = "/var/lib/certs/shelly.lan.key";
@@ -241,19 +243,26 @@ Limitations:
 
 - **`services.shelly-manager.api`** runs the API as a hardened systemd
   service with a dynamic user. Data is kept in `/var/lib/shelly-manager`.
-  - It listens on `127.0.0.1:8000` by default.
+  - It listens on `127.0.0.1:8000` by default (`address`, `port`).
   - `settings` becomes the JSON file named by `SHELLY_CONFIG_FILE`.
   - Without `secretKeyFile`, it generates a key on first start and keeps it.
     Changing the key makes stored credentials and backups unreadable.
+  - The API reads its secrets from files (`SHELLY_SECRET_KEY_FILE`,
+    `SHELLY_AUTH_TOKEN_FILE`), never from the environment. Upstream reads
+    only the environment; the package adds the `_FILE` variants with a
+    patch.
   - mDNS discovery may need UDP port 5353 open in the firewall.
 - **`services.shelly-manager.web`** serves the interface from an nginx virtual
-  host, so TLS and the like are configured through
-  `services.nginx.virtualHosts.<hostName>`.
+  host, `services.nginx.virtualHosts.shelly-manager` by default
+  (`virtualHost`), where TLS, listen addresses and the like are configured.
+  - `serverName` sets the host name it answers to.
   - Unless `apiUrl` is set, it proxies `/api` to the local API and the
     interface uses its own origin, so no CORS setup is needed.
+  - `openFirewall` opens the ports the virtual host listens on, as nginx
+    works them out from its listen settings.
 - **Unauthenticated access is refused.** If no `api.authTokenFile` is set, the
   API must be reachable from this machine only, or evaluation fails. It is
-  reachable from elsewhere when `api.listenAddress` is not a numeric loopback
+  reachable from elsewhere when `api.address` is not a numeric loopback
   address, or when the web interface proxies `/api` on one; the firewall does
   not count. Set `services.shelly-manager.api.allowUnauthenticatedAccess =
   true` to allow it anyway, for example on a trusted LAN.
