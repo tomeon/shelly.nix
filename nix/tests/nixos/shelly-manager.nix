@@ -27,11 +27,19 @@
   testScript = {nodes, ...}: let
     inherit (nodes.machine) environment services systemd;
     service = systemd.services.shelly-manager-api;
-    api = "http://${services.shelly-manager.api.address}:${toString services.shelly-manager.api.port}";
+    inherit (services.shelly-manager.api) addresses port;
     web = "http://${services.shelly-manager.web.serverName}";
   in ''
     import json
     import shlex
+
+    port = ${toString port}
+    addresses = ${builtins.toJSON addresses}
+
+    def host(address):
+        return f"[{address}]" if ":" in address else address
+
+    api = f"http://{host(addresses[0])}:{port}"
 
     def status(url, *args):
         return machine.succeed(shlex.join(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", *args, url])).strip()
@@ -45,17 +53,21 @@
     key_file = ${builtins.toJSON service.environment.SHELLY_SECRET_KEY_FILE}
 
     machine.wait_for_unit("shelly-manager-api.service")
-    machine.wait_for_open_port(${toString services.shelly-manager.api.port})
+    machine.wait_for_open_port(port)
     machine.wait_for_unit("nginx.service")
     machine.wait_for_open_port(80)
 
-    with subtest("the API answers, on localhost only"):
-        machine.succeed("curl -sf ${api}/api/health | jq -e '.status == \"healthy\"'")
-        machine.succeed("ss -Htln 'sport = :${toString services.shelly-manager.api.port}' | grep -q '${services.shelly-manager.api.address}:'")
+    with subtest("the API answers on each of its addresses, and listens nowhere else"):
+        assert addresses == ["127.0.0.1", "::1"], addresses
+        listening = machine.succeed(f"ss -Htln 'sport = :{port}'")
+        assert len(listening.splitlines()) == len(addresses), listening
+        for address in addresses:
+            assert f"{host(address)}:{port}" in listening, listening
+            machine.succeed(f"curl -sf http://{host(address)}:{port}/api/health | jq -e '.status == \"healthy\"'")
 
     with subtest("the auth token is required"):
-        assert status("${api}/api/credentials") == "401"
-        assert status("${api}/api/credentials", *auth) == "200"
+        assert status(f"{api}/api/credentials") == "401"
+        assert status(f"{api}/api/credentials", *auth) == "200"
 
     with subtest("secrets are read from files, not passed in the environment"):
         environ = main_process_environment()
@@ -73,12 +85,12 @@
         key = machine.succeed(f"cat {shlex.quote(key_file)}")
         machine.succeed(f"stat -L -c %a {shlex.quote(key_file)} | grep -qx 600")
         credential = json.dumps({"mac": "AABBCCDDEEFF", "password": "pw"})
-        machine.succeed(shlex.join(["curl", "-sf", "-X", "POST", *auth, "-H", "Content-Type: application/json", "-d", credential, "${api}/api/credentials"]))
+        machine.succeed(shlex.join(["curl", "-sf", "-X", "POST", *auth, "-H", "Content-Type: application/json", "-d", credential, f"{api}/api/credentials"]))
         machine.systemctl("restart shelly-manager-api.service")
-        machine.wait_for_open_port(${toString services.shelly-manager.api.port})
+        machine.wait_for_open_port(port)
         assert key == machine.succeed(f"cat {shlex.quote(key_file)}")
         # Decrypting the stored credential needs the same key.
-        machine.succeed(shlex.join(["curl", "-sf", *auth, "${api}/api/credentials"]) + " | jq -e '.[0].mac == \"AABBCCDDEEFF\"'")
+        machine.succeed(shlex.join(["curl", "-sf", *auth, f"{api}/api/credentials"]) + " | jq -e '.[0].mac == \"AABBCCDDEEFF\"'")
 
     with subtest("the web interface is served, with the API on the same origin"):
         machine.succeed("curl -sf ${web}/ | grep -q '<div id=\"root\">'")

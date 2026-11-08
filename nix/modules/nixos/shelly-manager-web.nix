@@ -67,14 +67,16 @@ moduleWithSystem ({config, ...} @ perSystem: {
       else line.port)
     lines);
 
+  # Where the proxy reaches the API: one of its addresses, a loopback one if
+  # there is one, with a wildcard replaced by the loopback address.
   apiHost = let
-    inherit (api) address;
+    address = lib.findFirst isLoopback (lib.head api.addresses) api.addresses;
   in
     if address == "0.0.0.0"
     then "127.0.0.1"
     else if address == "::"
     then "[::1]"
-    else if lib.hasInfix ":" address
+    else if lib.hasInfix ":" address && !lib.hasPrefix "[" address
     then "[${address}]"
     else address;
 

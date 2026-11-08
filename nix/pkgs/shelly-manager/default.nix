@@ -89,8 +89,23 @@ in
           mkdir -p "''${script%/*}"
           cat > "$script" <<'SCRIPT'
           #!/usr/bin/env python3
+          import os
+          import socket
           import sys
+
           from uvicorn.main import main
+          from uvicorn.server import Server
+
+          # Sockets from systemd socket activation (sd_listen_fds(3)) are
+          # served in place of --host and --port: uvicorn's CLI takes one --fd.
+          if os.environ.get("LISTEN_PID") == str(os.getpid()):
+              count = int(os.environ.get("LISTEN_FDS", "0"))
+              for name in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+                  os.environ.pop(name, None)
+              inherited = [socket.socket(fileno=fd) for fd in range(3, 3 + count)]
+              run = Server.run
+              Server.run = lambda self, sockets=None: run(self, sockets=sockets or inherited)
+
           main(["api.main:app_factory", "--factory", *sys.argv[1:]], prog_name="shelly-manager-api")
           SCRIPT
           chmod +x "$script"

@@ -12,14 +12,25 @@ moduleWithSystem ({config, ...} @ perSystem: {
 
   inherit (import ./lib.nix {inherit lib;}) isLoopback;
 
-  # uvicorn options that decide where it listens.
+  # uvicorn options that would make it listen elsewhere than the sockets
+  # systemd passes it.
   bindingArgs =
     lib.filter (
       arg:
         lib.any (option: arg == option || lib.hasPrefix "${option}=" arg)
-        ["--host" "--port" "--uds" "--fd"]
+        ["--host" "--port" "--uds" "--fd" "--workers" "--reload"]
     )
     cfg.extraArgs;
+
+  exposed = lib.filter (address: !isLoopback address) cfg.addresses;
+
+  # systemd's ListenStream= syntax.
+  listenStream = address: let
+    host =
+      if lib.hasInfix ":" address && !lib.hasPrefix "[" address
+      then "[${address}]"
+      else address;
+  in "${host}:${toString cfg.port}";
 
   stateDir = "/var/lib/shelly-manager";
   # The key generated when `secretKeyFile` is null.
@@ -46,14 +57,19 @@ in {
           '';
         };
 
-        address = mkOption {
-          type = types.str;
-          default = "127.0.0.1";
-          example = "0.0.0.0";
+        addresses = mkOption {
+          type = types.nonEmptyListOf types.str;
+          default = ["127.0.0.1"] ++ lib.optional config.networking.enableIPv6 "::1";
+          defaultText = lib.literalExpression ''["127.0.0.1"] ++ lib.optional config.networking.enableIPv6 "::1"'';
+          example = ["0.0.0.0" "::"];
           description = ''
-            Address the API listens on.  The default suits the web interface on
-            the same machine, which proxies to it; listen on a LAN address if
-            devices fetch firmware from the API directly.
+            IP addresses the API listens on, each on `port`.  systemd opens the
+            sockets (socket activation), so these must be numeric, and `::`
+            means IPv6 only.
+
+            The default suits the web interface on the same machine, which
+            proxies to it.  Listen on a LAN address if devices fetch firmware
+            from the API directly.
           '';
         };
 
@@ -102,7 +118,8 @@ in {
           default = false;
           description = ''
             Allow other machines to reach the API without `authTokenFile`:
-            through a non-loopback `address`, or through the web interface's
+            through a non-loopback address in `addresses`, or through the web
+            interface's
             `/api` proxy.  Anyone who can reach it can then change and reboot
             your devices.  Without this, such a configuration is refused.
 
@@ -134,9 +151,10 @@ in {
           default = [];
           example = ["--proxy-headers"];
           description = ''
-            Extra arguments for uvicorn.  Where the API listens is set with
-            `address` and `port` alone, so `--host`, `--port`, `--uds` and
-            `--fd` are refused here.
+            Extra arguments for uvicorn.  The API serves the sockets systemd
+            opens for `addresses` and `port`, so `--host`, `--port`, `--uds`,
+            `--fd`, `--workers` and `--reload`, which would make it listen
+            elsewhere, are refused here.
           '';
         };
       };
@@ -147,21 +165,33 @@ in {
     assertions = [
       {
         assertion = bindingArgs == [];
-        message = "services.shelly-manager.api.extraArgs: ${lib.concatStringsSep ", " bindingArgs} would change where the API listens, past the authentication check; use address and port.";
+        message = "services.shelly-manager.api.extraArgs: ${lib.concatStringsSep ", " bindingArgs} would change where the API listens, past the authentication check; use addresses and port.";
       }
       {
-        assertion = cfg.authTokenFile != null || cfg.allowUnauthenticatedAccess || isLoopback cfg.address;
-        message = "services.shelly-manager.api: the API listens on ${cfg.address} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
+        assertion = cfg.authTokenFile != null || cfg.allowUnauthenticatedAccess || exposed == [];
+        message = "services.shelly-manager.api: the API listens on ${lib.concatStringsSep ", " exposed} without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true.";
       }
     ];
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [cfg.port];
 
+    # One socket per address: uvicorn binds a single --host, but serves every
+    # socket it is given (see the launcher in nix/pkgs/shelly-manager).
+    systemd.sockets.shelly-manager-api = {
+      description = "Shelly Manager API sockets";
+      wantedBy = ["sockets.target"];
+      listenStreams = map listenStream cfg.addresses;
+      # As uvicorn would: `::` is IPv6 only, so that `0.0.0.0` can be listed
+      # too.
+      socketConfig.BindIPv6Only = "ipv6-only";
+    };
+
     systemd.services.shelly-manager-api = {
       description = "Shelly Manager API, for discovering, configuring and updating Shelly devices";
       wantedBy = ["multi-user.target"];
+      requires = ["shelly-manager-api.socket"];
       wants = ["network-online.target"];
-      after = ["network-online.target"];
+      after = ["network-online.target" "shelly-manager-api.socket"];
 
       # The API reads its secrets from these files (patched in; see
       # nix/pkgs/shelly-manager).  `%d` is the credentials directory.
@@ -188,9 +218,8 @@ in {
         fi
       '';
 
-      # uvicorn takes the last of repeated options: the module's come last.
       script = ''
-        exec ${lib.getExe cfg.package} ${lib.escapeShellArgs (cfg.extraArgs ++ ["--host" cfg.address "--port" (toString cfg.port)])}
+        exec ${lib.getExe cfg.package} ${lib.escapeShellArgs cfg.extraArgs}
       '';
 
       serviceConfig = {

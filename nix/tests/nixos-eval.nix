@@ -175,6 +175,60 @@
       ];
     };
 
+    # One socket per address; IPv6 loopback too, where IPv6 is enabled.
+    testApiAddresses = {
+      expr = map (enableIPv6: let
+        config = evalConfig {
+          services.shelly-manager.api.enable = true;
+          networking.enableIPv6 = enableIPv6;
+        };
+      in {
+        inherit (config.services.shelly-manager.api) addresses;
+        inherit (config.systemd.sockets.shelly-manager-api) listenStreams;
+      }) [true false];
+      expected = [
+        {
+          addresses = ["127.0.0.1" "::1"];
+          listenStreams = ["127.0.0.1:8000" "[::1]:8000"];
+        }
+        {
+          addresses = ["127.0.0.1"];
+          listenStreams = ["127.0.0.1:8000"];
+        }
+      ];
+    };
+
+    testApiRefusalNamesExposedAddressesOnly = {
+      expr =
+        (complaints {
+          services.shelly-manager.api = {
+            enable = true;
+            addresses = ["127.0.0.1" "192.168.1.5" "::1" "::"];
+          };
+        }).failed;
+      expected = ["services.shelly-manager.api: the API listens on 192.168.1.5, :: without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
+    };
+
+    # The proxy prefers a loopback address, and replaces a wildcard with one.
+    testProxyTarget = {
+      expr = map (addresses:
+        (evalConfig {
+          imports = [apiAndWeb withToken];
+          services.shelly-manager.api.addresses = addresses;
+        }).services.nginx.virtualHosts.shelly-manager.locations."/api/".proxyPass) [
+        ["192.168.1.5" "::1"]
+        ["0.0.0.0"]
+        ["::"]
+        ["192.168.1.5"]
+      ];
+      expected = [
+        "http://[::1]:8000"
+        "http://127.0.0.1:8000"
+        "http://[::1]:8000"
+        "http://192.168.1.5:8000"
+      ];
+    };
+
     testRemoteApiIsNotThisMachinesConcern = {
       expr = complaints {
         services.shelly-manager.web = {
@@ -194,7 +248,7 @@
       expr = complaints {
         services.shelly-manager.api = {
           enable = true;
-          address = "0.0.0.0";
+          addresses = ["0.0.0.0"];
         };
       };
       expected = {
@@ -207,7 +261,7 @@
       expr = complaints {
         services.shelly-manager.api = {
           enable = true;
-          address = "127.0.0.2";
+          addresses = ["127.0.0.2"];
         };
       };
       expected = none;
@@ -219,7 +273,7 @@
         (complaints {
           services.shelly-manager.api = {
             enable = true;
-            address = "127.office.lan";
+            addresses = ["127.office.lan"];
           };
         }).failed;
       expected = ["services.shelly-manager.api: the API listens on 127.office.lan without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
@@ -232,7 +286,7 @@
         (complaints {
           services.shelly-manager.api = {
             enable = true;
-            inherit address;
+            addresses = [address];
           };
         }).failed) ["127.0.0.999" "127.000.0.1" "127.0.0.01" "127.0.0.1.lan"];
       expected = [1 1 1 1];
@@ -244,7 +298,7 @@
         (complaints {
           services.shelly-manager.api = {
             enable = true;
-            address = "unix:api";
+            addresses = ["unix:api"];
           };
         }).failed;
       expected = ["services.shelly-manager.api: the API listens on unix:api without authentication; set services.shelly-manager.api.authTokenFile, or services.shelly-manager.api.allowUnauthenticatedAccess = true."];
@@ -255,7 +309,7 @@
         (complaints {
           services.shelly-manager.api = {
             enable = true;
-            inherit address;
+            addresses = [address];
           };
         }).failed) ["127.255.255.255" "127.0.0.0" "127.10.200.9"];
       expected = [[] [] []];
@@ -267,10 +321,10 @@
           services.shelly-manager.api = {
             enable = true;
             authTokenFile = token;
-            extraArgs = ["--proxy-headers" "--host" "0.0.0.0" "--port=9000" "--uds" "/run/x" "--fd=3"];
+            extraArgs = ["--proxy-headers" "--host" "0.0.0.0" "--port=9000" "--uds" "/run/x" "--fd=3" "--workers=2" "--reload"];
           };
         }).failed;
-      expected = ["services.shelly-manager.api.extraArgs: --host, --port=9000, --uds, --fd=3 would change where the API listens, past the authentication check; use address and port."];
+      expected = ["services.shelly-manager.api.extraArgs: --host, --port=9000, --uds, --fd=3, --workers=2, --reload would change where the API listens, past the authentication check; use addresses and port."];
     };
 
     testExtraArgsOtherwiseAllowed = {
@@ -287,7 +341,7 @@
       expr = complaints {
         services.shelly-manager.api = {
           enable = true;
-          address = "0.0.0.0";
+          addresses = ["0.0.0.0"];
           authTokenFile = token;
         };
       };
@@ -298,7 +352,7 @@
       expr = complaints {
         services.shelly-manager.api = {
           enable = true;
-          address = "0.0.0.0";
+          addresses = ["0.0.0.0"];
           allowUnauthenticatedAccess = true;
         };
       };

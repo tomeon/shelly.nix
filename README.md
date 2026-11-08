@@ -243,7 +243,9 @@ Limitations:
 
 - **`services.shelly-manager.api`** runs the API as a hardened systemd
   service with a dynamic user. Data is kept in `/var/lib/shelly-manager`.
-  - It listens on `127.0.0.1:8000` by default (`address`, `port`).
+  - It listens on port 8000 of `127.0.0.1`, and of `::1` if IPv6 is enabled
+    (`addresses`, `port`). systemd opens a socket for each address and hands
+    them to the API (socket activation).
   - `settings` becomes the JSON file named by `SHELLY_CONFIG_FILE`.
   - Without `secretKeyFile`, it generates a key on first start and keeps it.
     Changing the key makes stored credentials and backups unreadable.
@@ -262,7 +264,7 @@ Limitations:
     works them out from its listen settings.
 - **Unauthenticated access is refused.** If no `api.authTokenFile` is set, the
   API must be reachable from this machine only, or evaluation fails. It is
-  reachable from elsewhere when `api.address` is not a numeric loopback
+  reachable from elsewhere when any of `api.addresses` is not a loopback
   address, or when the web interface proxies `/api` on one; the firewall does
   not count. Set `services.shelly-manager.api.allowUnauthenticatedAccess =
   true` to allow it anyway, for example on a trusted LAN.
